@@ -21,7 +21,6 @@
 bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/asn/main/install.sh)
 ```
 
-> Замените `wh3r3ar3you` на ваш GitHub username.
 
 ## 🔧 Ручная установка
 
