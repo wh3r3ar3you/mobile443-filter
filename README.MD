@@ -1,127 +1,164 @@
-## Как это работает
+# 🛡️ mobile443 — ASN-фильтр для VPN
 
-Скрипт собирает актуальные IPv4-префиксы по списку ASN через RIPEstat (`announced-prefixes`), загружает их в `ipset allowed_mobile_443` и навешивает `iptables`-цепочку `FILTER_MOBILE_443` на `INPUT`, `FORWARD` и `DOCKER-USER`.
+Автоматический фильтр подключений к VPN-серверу по ASN (автономным системам).  
+Разрешает подключения **только с мобильных операторов РФ**, блокирует всё остальное.
 
-Логика простая:
+## ✨ Возможности
 
-- если source IP входит в `allowed_mobile_443` → `ACCEPT`
-- если source IP не входит → `DROP`
+- 📡 **Фильтрация по ASN** — только мобильные операторы (МТС, Билайн, МегаФон, Tele2, Ростелеком)
+- 🔌 **Настраиваемые порты** — задаёте при установке, без хардкода
+- 📱 **Telegram-уведомления пользователям** — при блокировке подключения
+- 📊 **Ежедневная статистика админу** — сколько заблокировано, топ IP
+- 🔄 **Автообновление списков** — ежедневно в 00:00 через RIPEstat API
+- 🐳 **Docker-совместимость** — автоматическая интеграция с DOCKER-USER
+- 🔗 **Интеграция с Remnanode/Xray** — определение пользователей по email
 
-Обновление безопасное:
+## ⚡ Быстрая установка
 
-- новые префиксы сначала собираются во временный файл
-- затем загружаются во временный `ipset`
-- после проверки делается `swap`
-- если API ответил криво, боевой список не очищается
-- последний валидный список хранится в кэше
-- обновление запускается ежедневно в `00:00`
+Одна команда на вашем сервере:
 
-## Какие ASN входят
-
-### MTS
-- `8359`
-
-### Beeline / VimpelCom
-- `3216`
-- `16345`
-
-### MegaFon core + related
-- `31133`
-- `8263`
-- `6854`
-- `50928`
-- `48615`
-- `47395`
-- `47218`
-- `43841`
-- `42891`
-- `41976`
-- `35298`
-- `34552`
-- `31268`
-- `31224`
-- `31213`
-- `31208`
-- `31205`
-- `31195`
-- `31163`
-- `29648`
-- `25290`
-- `25159`
-- `24866`
-- `20663`
-- `20632`
-- `12396`
-- `202804`
-
-### T2 regional
-- `12958`
-- `15378`
-- `42437`
-- `48092`
-- `48190`
-- `41330`
-
-### Miranda
-- `201776`
-
-### Sberbank-Telecom
-- `206673`
-
-### Rostelecom
-- `12389`
-
-### T-Mobile / Alfa-Mobile
-- `205638`
-- `214257`
-
-## Важно
-
-Это **mobile-focused allowlist**, а не идеальный детектор “только SIM”.  
-Часть fixed-клиентов крупных операторов (`MTS`, `Beeline`, `MegaFon`, `Rostelecom`) тоже может проходить, потому что их ASN используются не только для мобильного доступа.
-
-# mobile443-filter
-
-Фильтр 443/tcp и 443/udp по allowlist мобильных ASN РФ.
-
-## Установка и диагностика
 ```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/asn/main/install.sh)
+```
+
+> Замените `wh3r3ar3you` на ваш GitHub username.
+
+## 🔧 Ручная установка
+
+```bash
+# Клонируем репозиторий
+git clone https://github.com/wh3r3ar3you/asn.git
+cd asn
+
+# Делаем исполняемым и запускаем
 chmod +x asn.sh
-sudo ./asn.sh install
-### Удаление
-sudo ./asn.sh remove
+./asn.sh install
+```
 
-## Диагностика
+## 📋 Что спросит при установке
+
+1. **Порты** — на каких портах фильтровать (например: `443 8443 9443 10443`)
+2. **Telegram уведомления** — включить или нет (`y/n`)
+3. Если да:
+   - **Токен бота** — получите у [@BotFather](https://t.me/BotFather)
+   - **Telegram ID админа** — ваш числовой ID (узнать: [@userinfobot](https://t.me/userinfobot))
+   - **Путь к access.log** — скрипт попытается найти автоматически
+
+## 📂 Структура после установки
+
+```
+/opt/mobile443/
+├── asns.conf          # Список ASN для allowlist
+└── config.conf        # Конфигурация (порты, токен, и т.д.)
+
+/var/lib/mobile443/
+├── prefixes.txt       # Кеш IP-префиксов
+├── stats_blocked.txt  # Лог заблокированных подключений
+├── notified.txt       # Трекер уведомлений (cooldown)
+└── lock               # Lock-файл
+
+/usr/local/sbin/
+├── mobile443-common.sh       # Общие функции
+├── mobile443-update.sh       # Обновление ASN-списков
+├── mobile443-apply-cache.sh  # Применение кешированных правил
+├── mobile443-monitor.sh      # Мониторинг блокировок → Telegram
+└── mobile443-stats.sh        # Ежедневная статистика
+
+Systemd сервисы:
+├── mobile443-apply.service    # Применение правил при загрузке
+├── mobile443-update.service   # Обновление ASN-списков
+├── mobile443-update.timer     # Таймер обновления (00:00)
+├── mobile443-monitor.service  # Мониторинг блокировок
+├── mobile443-stats.service    # Отправка статистики
+└── mobile443-stats.timer      # Таймер статистики (09:00)
+```
+
+## 🔍 Проверка работы
 
 ```bash
-# Проверить, входит ли IP в allowlist
-ipset test allowed_mobile_443 1.2.3.4
+# Статус обновления ASN
+systemctl status mobile443-update.service --no-pager
 
-# Количество подсетей в allowlist
-ipset list allowed_mobile_443 | grep 'Number of entries'
+# Таймер обновления
+systemctl status mobile443-update.timer --no-pager
 
-# Первые 50 подсетей
-ipset list allowed_mobile_443 | sed -n '/^Members:/,$p' | tail -n +2 | head -50
+# Мониторинг блокировок (если включен Telegram)
+systemctl status mobile443-monitor.service --no-pager
 
-# Счётчики ACCEPT / DROP
+# Логи монитора в реальном времени
+journalctl -u mobile443-monitor.service -f --no-pager
+
+# Текущие правила iptables
 iptables -L FILTER_MOBILE_443 -n -v --line-numbers
 
-# Смотреть счётчики в реальном времени
-watch -n 1 'iptables -L FILTER_MOBILE_443 -n -v --line-numbers'
+# Количество IP в allowlist
+ipset list allowed_mobile_443 | head -10
+```
 
-# Посмотреть, через какую цепочку идёт трафик
-iptables -L INPUT -n -v --line-numbers | head -30
-iptables -L FORWARD -n -v --line-numbers | head -30
-iptables -L DOCKER-USER -n -v --line-numbers
+## 🗑️ Удаление
 
-# Посмотреть пакеты на 443
-tcpdump -ni any port 443
+```bash
+./asn.sh remove
+```
 
-# Посмотреть пакеты от конкретного IP
-tcpdump -ni any host 1.2.3.4 and port 443
+Или одной командой:
 
-# Проверить обновление и таймер
-systemctl status mobile443-update.service --no-pager
-systemctl status mobile443-update.timer --no-pager
-journalctl -u mobile443-update.service -n 100 --no-pager
-journalctl -u mobile443-apply.service -n 100 --no-pager
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/asn/main/install.sh) remove
+```
+
+## 📱 Telegram-уведомления
+
+### Для пользователей
+Когда подключение блокируется, бот отправляет сообщение пользователю с предупреждением.
+
+**Как определяется пользователь:**
+- Из iptables LOG извлекается заблокированный IP
+- В `access.log` xray ищем этот IP → находим email
+- Формат email: `idremna_idtelegram` → извлекаем Telegram ID
+- Отправляем уведомление (cooldown 6 часов, чтобы не спамить)
+
+> ⚠️ **Ограничение:** уведомление возможно только если IP ранее был виден в access.log xray. Если пользователь впервые подключается с заблокированного IP — xray его не видел.
+
+### Для админа
+Каждый день в **09:00** бот отправляет отчёт:
+- 🚫 Количество заблокированных соединений
+- 🌐 Уникальных заблокированных IP
+- 📋 Размер allowlist
+- 🔝 Топ-10 заблокированных IP
+
+## 📡 Список поддерживаемых ASN
+
+| Оператор | ASN |
+|----------|-----|
+| МТС | 8359 |
+| Билайн | 3216 |
+| МегаФон | 31133, 8263, 6854 и др. |
+| Tele2 | 12958, 15378 и др. |
+| Miranda | 201776 |
+| Сбербанк-Телеком | 206673 |
+| Ростелеком | 12389 |
+
+Полный список — в файле `asns.conf` после установки.
+
+## ⚙️ Изменение конфигурации
+
+Для изменения портов, токена или других настроек:
+
+```bash
+# Переустановите с новыми параметрами
+./asn.sh remove
+./asn.sh install
+```
+
+Или вручную отредактируйте `/opt/mobile443/config.conf` и перезапустите сервисы:
+
+```bash
+nano /opt/mobile443/config.conf
+systemctl restart mobile443-apply.service
+systemctl restart mobile443-monitor.service
+```
+
+## 📝 Лицензия
+
+MIT
