@@ -17,6 +17,8 @@ detect_xray_log() {
 
   XRAY_ACCESS_LOG=""
   local -a candidates=(
+    "/var/log/remnanode/access.log"
+    "/var/log/remnanode/xray/access.log"
     "/var/lib/remnanode/access.log"
     "/var/lib/remnanode/xray/access.log"
     "/opt/remnanode/access.log"
@@ -41,7 +43,7 @@ detect_xray_log() {
     echo "$found" | while IFS= read -r f; do echo "     - $f"; done
     echo ""
     echo "   Введите путь или Enter для первого найденного:"
-    read -rp "   > " user_path
+    read -rp "   > " user_path < /dev/tty
     XRAY_ACCESS_LOG="${user_path:-$(echo "$found" | head -1)}"
     echo "   ✅ Используем: $XRAY_ACCESS_LOG"
     return
@@ -49,7 +51,7 @@ detect_xray_log() {
 
   echo "   ⚠️  Автоматически не найден."
   echo "   Введите полный путь к access.log xray:"
-  read -rp "   > " XRAY_ACCESS_LOG
+  read -rp "   > " XRAY_ACCESS_LOG < /dev/tty
 }
 
 interactive_setup() {
@@ -63,7 +65,7 @@ interactive_setup() {
   echo "📡 На каких портах должен работать фильтр?"
   echo "   Введите порты через пробел"
   echo "   Пример: 443 8443 9443 10443 11443 12443 13443"
-  read -rp "   > " input_ports
+  read -rp "   > " input_ports < /dev/tty
   PORTS="${input_ports:-443}"
   echo "   ✅ Порты: $PORTS"
   echo ""
@@ -72,16 +74,16 @@ interactive_setup() {
   echo "📱 Включить уведомления в Telegram? (y/n)"
   echo "   • Пользователям — уведомление при блокировке подключения"
   echo "   • Админу — ежедневная статистика блокировок"
-  read -rp "   > " tg_choice
+  read -rp "   > " tg_choice < /dev/tty
 
   if [[ "${tg_choice,,}" == "y" ]]; then
     TG_ENABLED="true"
     echo ""
     echo "🤖 Введите токен Telegram бота:"
-    read -rp "   > " TG_BOT_TOKEN
+    read -rp "   > " TG_BOT_TOKEN < /dev/tty
     echo ""
     echo "👤 Введите Telegram ID администратора (для статистики):"
-    read -rp "   > " TG_ADMIN_ID
+    read -rp "   > " TG_ADMIN_ID < /dev/tty
     echo ""
     detect_xray_log
   else
