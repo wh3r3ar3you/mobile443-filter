@@ -1,128 +1,114 @@
-# mobile443-filter
+# 🛡️ mobile443 — ASN-фильтр для VPN
 
-Фильтр 443/tcp и 443/udp по allowlist мобильных ASN РФ.
+Фильтр подключений к VPN-серверу по ASN.  
+Разрешает подключения **только с мобильных операторов РФ**, блокирует всё остальное.  
+Интеграция с **Remnawave** панелью для Telegram-уведомлений пользователям.
 
-## Как это работает
+## ⚡ Установка
 
-Скрипт собирает актуальные IPv4-префиксы по списку ASN через RIPEstat (`announced-prefixes`), загружает их в `ipset allowed_mobile_443` и навешивает `iptables`-цепочку `FILTER_MOBILE_443` на `INPUT`, `FORWARD` и `DOCKER-USER`.
-
-Логика простая:
-
-- если source IP входит в `allowed_mobile_443` → `ACCEPT`
-- если source IP не входит → `DROP`
-
-Обновление безопасное:
-
-- новые префиксы сначала собираются во временный файл
-- затем загружаются во временный `ipset`
-- после проверки делается `swap`
-- если API ответил криво, боевой список не очищается
-- последний валидный список хранится в кэше
-- обновление запускается ежедневно в `00:00`
-
-## Какие ASN входят
-
-### MTS
-- `8359`
-
-### Beeline / VimpelCom
-- `3216`
-- `16345`
-
-### MegaFon core + related
-- `31133`
-- `8263`
-- `6854`
-- `50928`
-- `48615`
-- `47395`
-- `47218`
-- `43841`
-- `42891`
-- `41976`
-- `35298`
-- `34552`
-- `31268`
-- `31224`
-- `31213`
-- `31208`
-- `31205`
-- `31195`
-- `31163`
-- `29648`
-- `25290`
-- `25159`
-- `24866`
-- `20663`
-- `20632`
-- `12396`
-- `202804`
-
-### T2 regional
-- `12958`
-- `15378`
-- `42437`
-- `48092`
-- `48190`
-- `41330`
-
-### Miranda
-- `201776`
-
-### Sberbank-Telecom
-- `206673`
-
-### Rostelecom
-- `12389`
-
-### T-Mobile / Alfa-Mobile
-- `205638`
-- `202498`
-- `214257`
-
-## Важно
-
-Это **mobile-focused allowlist**, а не идеальный детектор “только SIM”.  
-Часть fixed-клиентов крупных операторов (`MTS`, `Beeline`, `MegaFon`, `Rostelecom`) тоже может проходить, потому что их ASN используются не только для мобильного доступа.
-
-
-## Установка и диагностика
 ```bash
-chmod +x asn.sh
-sudo ./asn.sh install
-### Удаление
-sudo ./asn.sh remove
+bash <(curl -Ls https://raw.githubusercontent.com/Makhkets/mobile443-filter/refs/heads/main/install.sh)
+```
 
-## Диагностика
+## 📋 Что спросит при установке
+
+1. **Порты** — на каких портах фильтровать (например: `443 8443 9443 10443 11443 12443 13443`)
+2. **Telegram уведомления** — включить или нет (`y/n`)
+3. Если включены:
+   - **Токен Telegram бота** — от [@BotFather](https://t.me/BotFather)
+   - **Telegram ID админа** — для ежедневной статистики
+   - **Адрес панели Remnawave** — например `https://panel.example.com`
+   - **API токен Remnawave** — для запросов к панели
+   - **Источник Telegram ID** — откуда брать ID пользователя:
+     - `1` — из поля `telegramId` в API Remnawave
+     - `2` — из поля `username`, парсинг последнего значения после `_`
+   - **Путь к access.log** — скрипт попытается найти автоматически
+
+## 📱 Как работают уведомления
+
+### Определение пользователя
+
+1. Iptables логирует заблокированный IP
+2. В `access.log` xray по IP находится **ID пользователя** (поле `email`)
+3. По этому ID делается запрос к Remnawave API (`/api/users/by-id/{id}`)
+4. Из ответа API извлекается Telegram ID (в зависимости от выбранного источника)
+5. Пользователю отправляется уведомление о блокировке (cooldown — 6 часов)
+
+### Статистика для админа
+
+Каждый день в **09:00** бот отправляет отчёт: количество блокировок, уникальные IP, топ-10 IP.
+
+## ⚙️ Предварительная настройка xray
+
+Чтобы уведомления работали, нужен `access.log` от xray на хосте.
+
+**1. Добавьте в конфиг xray секцию `log`:**
+
+```json
+{
+  "log": {
+    "access": "/var/log/remnanode/access.log",
+    "loglevel": "info"
+  }
+}
+```
+
+**2. Пробросьте логи через Docker volume в `docker-compose.yml`:**
+
+```yaml
+volumes:
+  - '/var/log/remnanode:/var/log/remnanode'
+```
+
+**3. Перезапустите контейнер:**
 
 # Проверить, входит ли IP в allowlist
 ipset test allowed_mobile_443 1.2.3.4
 
-# Количество подсетей в allowlist
-ipset list allowed_mobile_443 | grep 'Number of entries'
+```bash
+# Статус сервисов
+systemctl status mobile443-monitor.service --no-pager
+systemctl status mobile443-update.timer --no-pager
 
-# Первые 50 подсетей
-ipset list allowed_mobile_443 | sed -n '/^Members:/,$p' | tail -n +2 | head -50
+# Логи монитора
+journalctl -u mobile443-monitor.service -f --no-pager
 
-# Счётчики ACCEPT / DROP
+# Правила iptables
 iptables -L FILTER_MOBILE_443 -n -v --line-numbers
 
-# Смотреть счётчики в реальном времени
-watch -n 1 'iptables -L FILTER_MOBILE_443 -n -v --line-numbers'
+# Количество IP в allowlist
+ipset list allowed_mobile_443 | head -10
+```
 
-# Посмотреть, через какую цепочку идёт трафик
-iptables -L INPUT -n -v --line-numbers | head -30
-iptables -L FORWARD -n -v --line-numbers | head -30
-iptables -L DOCKER-USER -n -v --line-numbers
+## �️ Удаление
 
-# Посмотреть пакеты на 443
-tcpdump -ni any port 443
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/Makhkets/mobile443-filter/refs/heads/main/install.sh) remove
+```
 
-# Посмотреть пакеты от конкретного IP
-tcpdump -ni any host 1.2.3.4 and port 443
+## ⚙️ Изменение конфигурации
 
-# Проверить обновление и таймер
-systemctl status mobile443-update.service --no-pager
-systemctl status mobile443-update.timer --no-pager
-journalctl -u mobile443-update.service -n 100 --no-pager
-journalctl -u mobile443-apply.service -n 100 --no-pager
+```bash
+# Переустановка
+./asn.sh remove && ./asn.sh install
+```
+
+Или вручную:
+
+```bash
+nano /opt/mobile443/config.conf
+systemctl restart mobile443-monitor.service
+```
+
+## 📂 Структура
+
+```
+/opt/mobile443/config.conf       # Конфигурация
+/opt/mobile443/asns.conf         # Список ASN
+/var/lib/mobile443/              # Состояние (кеш, статистика, lock)
+/usr/local/sbin/mobile443-*.sh   # Скрипты
+```
+
+## 📝 Лицензия
+
+MIT
