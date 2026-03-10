@@ -1,121 +1,48 @@
 # 🛡️ mobile443 — ASN-фильтр для VPN
 
-Автоматический фильтр подключений к VPN-серверу по ASN (автономным системам).  
-Разрешает подключения **только с мобильных операторов РФ**, блокирует всё остальное.
+Фильтр подключений к VPN-серверу по ASN.  
+Разрешает подключения **только с мобильных операторов РФ**, блокирует всё остальное.  
+Интеграция с **Remnawave** панелью для Telegram-уведомлений пользователям.
 
-## ✨ Возможности
-
-- 📡 **Фильтрация по ASN** — только мобильные операторы (МТС, Билайн, МегаФон, Tele2, Ростелеком)
-- 🔌 **Настраиваемые порты** — задаёте при установке, без хардкода
-- 📱 **Telegram-уведомления пользователям** — при блокировке подключения
-- 📊 **Ежедневная статистика админу** — сколько заблокировано, топ IP
-- 🔄 **Автообновление списков** — ежедневно в 00:00 через RIPEstat API
-- 🐳 **Docker-совместимость** — автоматическая интеграция с DOCKER-USER
-- 🔗 **Интеграция с Remnanode/Xray** — определение пользователей по email
-
-## ⚡ Быстрая установка
-
-Одна команда на вашем сервере:
+## ⚡ Установка
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/asn/main/install.sh)
-```
-
-> Замените `wh3r3ar3you` на ваш GitHub username.
-
-## 🔧 Ручная установка
-
-```bash
-# Клонируем репозиторий
-git clone https://github.com/wh3r3ar3you/asn.git
-cd asn
-
-# Делаем исполняемым и запускаем
-chmod +x asn.sh
-./asn.sh install
+bash <(curl -Ls https://raw.githubusercontent.com/Makhkets/mobile443-filter/refs/heads/main/install.sh)
 ```
 
 ## 📋 Что спросит при установке
 
-1. **Порты** — на каких портах фильтровать (например: `443 8443 9443 10443`)
+1. **Порты** — на каких портах фильтровать (например: `443 8443 9443 10443 11443 12443 13443`)
 2. **Telegram уведомления** — включить или нет (`y/n`)
-3. Если да:
-   - **Токен бота** — получите у [@BotFather](https://t.me/BotFather)
-   - **Telegram ID админа** — ваш числовой ID (узнать: [@userinfobot](https://t.me/userinfobot))
+3. Если включены:
+   - **Токен Telegram бота** — от [@BotFather](https://t.me/BotFather)
+   - **Telegram ID админа** — для ежедневной статистики
+   - **Адрес панели Remnawave** — например `https://panel.example.com`
+   - **API токен Remnawave** — для запросов к панели
+   - **Источник Telegram ID** — откуда брать ID пользователя:
+     - `1` — из поля `telegramId` в API Remnawave
+     - `2` — из поля `username`, парсинг последнего значения после `_`
    - **Путь к access.log** — скрипт попытается найти автоматически
 
-## 📂 Структура после установки
+## 📱 Как работают уведомления
 
-```
-/opt/mobile443/
-├── asns.conf          # Список ASN для allowlist
-└── config.conf        # Конфигурация (порты, токен, и т.д.)
+### Определение пользователя
 
-/var/lib/mobile443/
-├── prefixes.txt       # Кеш IP-префиксов
-├── stats_blocked.txt  # Лог заблокированных подключений
-├── notified.txt       # Трекер уведомлений (cooldown)
-└── lock               # Lock-файл
+1. Iptables логирует заблокированный IP
+2. В `access.log` xray по IP находится **ID пользователя** (поле `email`)
+3. По этому ID делается запрос к Remnawave API (`/api/users/by-id/{id}`)
+4. Из ответа API извлекается Telegram ID (в зависимости от выбранного источника)
+5. Пользователю отправляется уведомление о блокировке (cooldown — 6 часов)
 
-/usr/local/sbin/
-├── mobile443-common.sh       # Общие функции
-├── mobile443-update.sh       # Обновление ASN-списков
-├── mobile443-apply-cache.sh  # Применение кешированных правил
-├── mobile443-monitor.sh      # Мониторинг блокировок → Telegram
-└── mobile443-stats.sh        # Ежедневная статистика
+### Статистика для админа
 
-Systemd сервисы:
-├── mobile443-apply.service    # Применение правил при загрузке
-├── mobile443-update.service   # Обновление ASN-списков
-├── mobile443-update.timer     # Таймер обновления (00:00)
-├── mobile443-monitor.service  # Мониторинг блокировок
-├── mobile443-stats.service    # Отправка статистики
-└── mobile443-stats.timer      # Таймер статистики (09:00)
-```
+Каждый день в **09:00** бот отправляет отчёт: количество блокировок, уникальные IP, топ-10 IP.
 
-## 🔍 Проверка работы
+## ⚙️ Предварительная настройка xray
 
-```bash
-# Статус обновления ASN
-systemctl status mobile443-update.service --no-pager
+Чтобы уведомления работали, нужен `access.log` от xray на хосте.
 
-# Таймер обновления
-systemctl status mobile443-update.timer --no-pager
-
-# Мониторинг блокировок (если включен Telegram)
-systemctl status mobile443-monitor.service --no-pager
-
-# Логи монитора в реальном времени
-journalctl -u mobile443-monitor.service -f --no-pager
-
-# Текущие правила iptables
-iptables -L FILTER_MOBILE_443 -n -v --line-numbers
-
-# Количество IP в allowlist
-ipset list allowed_mobile_443 | head -10
-```
-
-## 🗑️ Удаление
-
-```bash
-./asn.sh remove
-```
-
-Или одной командой:
-
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/asn/main/install.sh) remove
-```
-
-## 📱 Telegram-уведомления
-
-### ⚙️ Предварительная настройка (обязательно!)
-
-Чтобы уведомления работали, нужно включить access-лог в xray и пробросить его из Docker-контейнера на хост.
-
-#### 1. Включите логирование в конфиге xray
-
-Добавьте в конфиг xray (внутри контейнера Remnanode) секцию `log`:
+**1. Добавьте в конфиг xray секцию `log`:**
 
 ```json
 {
@@ -126,89 +53,63 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/asn/main/install.s
 }
 ```
 
-#### 2. Пробросьте директорию логов через Docker volume
-
-Добавьте volume в `docker-compose.yml` ноды, чтобы логи были видны на хосте:
+**2. Пробросьте логи через Docker volume в `docker-compose.yml`:**
 
 ```yaml
-services:
-  remnanode:
-    container_name: remnanode
-    hostname: remnanode
-    image: ghcr.io/remnawave/node:latest
-    env_file:
-      - .env
-    network_mode: host
-    restart: always
-    cap_add:
-      - NET_ADMIN
-    ulimits:
-      nofile:
-        soft: 1048576
-        hard: 1048576
-    volumes:
-      - '/var/log/remnanode:/var/log/remnanode'
+volumes:
+  - '/var/log/remnanode:/var/log/remnanode'
 ```
 
-#### 3. Перезапустите контейнер
+**3. Перезапустите контейнер:**
 
 ```bash
-cd /путь/к/docker-compose
 docker compose down && docker compose up -d
 ```
 
-После этого файл `access.log` появится на хосте по пути `/var/log/remnanode/access.log` — скрипт найдёт его автоматически при установке.
+## 🔍 Проверка работы
 
----
+```bash
+# Статус сервисов
+systemctl status mobile443-monitor.service --no-pager
+systemctl status mobile443-update.timer --no-pager
 
-### Для пользователей
-Когда подключение блокируется, бот отправляет сообщение пользователю с предупреждением.
+# Логи монитора
+journalctl -u mobile443-monitor.service -f --no-pager
 
-**Как определяется пользователь:**
-- Из iptables LOG извлекается заблокированный IP
-- В `access.log` xray ищем этот IP → находим email
-- Формат email: `idremna_idtelegram` → извлекаем Telegram ID
-- Отправляем уведомление (cooldown 6 часов, чтобы не спамить)
+# Правила iptables
+iptables -L FILTER_MOBILE_443 -n -v --line-numbers
 
-> ⚠️ **Ограничение:** уведомление возможно только если IP ранее был виден в access.log xray. Если пользователь впервые подключается с заблокированного IP — xray его не видел.
+# Количество IP в allowlist
+ipset list allowed_mobile_443 | head -10
+```
 
-### Для админа
-Каждый день в **09:00** бот отправляет отчёт:
-- 🚫 Количество заблокированных соединений
-- 🌐 Уникальных заблокированных IP
-- 📋 Размер allowlist
-- 🔝 Топ-10 заблокированных IP
+## �️ Удаление
 
-## 📡 Список поддерживаемых ASN
-
-| Оператор | ASN |
-|----------|-----|
-| МТС | 8359 |
-| Билайн | 3216 |
-| МегаФон | 31133, 8263, 6854 и др. |
-| Tele2 | 12958, 15378 и др. |
-| Miranda | 201776 |
-| Сбербанк-Телеком | 206673 |
-| Ростелеком | 12389 |
-
-Полный список — в файле `asns.conf` после установки.
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/Makhkets/mobile443-filter/refs/heads/main/install.sh) remove
+```
 
 ## ⚙️ Изменение конфигурации
 
-Для изменения портов, токена или других настроек:
-
 ```bash
-# Переустановите с новыми параметрами
-./asn.sh remove
-./asn.sh install
+# Переустановка
+./asn.sh remove && ./asn.sh install
 ```
 
-Или вручную отредактируйте `/opt/mobile443/config.conf` и перезапустите сервисы:
+Или вручную:
 
 ```bash
 nano /opt/mobile443/config.conf
-systemctl restart mobile443-apply.service
 systemctl restart mobile443-monitor.service
+```
+
+## 📂 Структура
+
+```
+/opt/mobile443/config.conf       # Конфигурация
+/opt/mobile443/asns.conf         # Список ASN
+/var/lib/mobile443/              # Состояние (кеш, статистика, lock)
+/usr/local/sbin/mobile443-*.sh   # Скрипты
 ```
 
 ## 📝 Лицензия

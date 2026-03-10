@@ -85,12 +85,41 @@ interactive_setup() {
     echo "👤 Введите Telegram ID администратора (для статистики):"
     read -rp "   > " TG_ADMIN_ID < /dev/tty
     echo ""
+
+    echo "🌐 Введите адрес панели Remnawave (например: https://panel.example.com):"
+    read -rp "   > " REMNAWAVE_API_URL < /dev/tty
+    # Убираем trailing slash
+    REMNAWAVE_API_URL="${REMNAWAVE_API_URL%/}"
+    echo "   ✅ Панель: $REMNAWAVE_API_URL"
+    echo ""
+
+    echo "🔑 Введите API токен Remnawave панели:"
+    read -rp "   > " REMNAWAVE_API_TOKEN < /dev/tty
+    echo ""
+
+    echo "📋 Откуда брать Telegram ID пользователя?"
+    echo "   1) Из поля telegramId пользователя в API Remnawave"
+    echo "   2) Из поля username — последнее значение после _ (нижнего подчёркивания)"
+    read -rp "   Выберите (1 или 2): " tg_id_source_choice < /dev/tty
+
+    if [[ "$tg_id_source_choice" == "2" ]]; then
+      TG_ID_SOURCE="username"
+      echo "   ✅ Telegram ID будет извлекаться из username (после последнего _)"
+    else
+      TG_ID_SOURCE="telegramId"
+      echo "   ✅ Telegram ID будет браться из поля telegramId"
+    fi
+    echo ""
+
     detect_xray_log
   else
     TG_ENABLED="false"
     TG_BOT_TOKEN=""
     TG_ADMIN_ID=""
     XRAY_ACCESS_LOG=""
+    REMNAWAVE_API_URL=""
+    REMNAWAVE_API_TOKEN=""
+    TG_ID_SOURCE=""
   fi
 
   mkdir -p "$BASE_DIR"
@@ -100,6 +129,9 @@ TG_ENABLED="$TG_ENABLED"
 TG_BOT_TOKEN="$TG_BOT_TOKEN"
 TG_ADMIN_ID="$TG_ADMIN_ID"
 XRAY_ACCESS_LOG="$XRAY_ACCESS_LOG"
+REMNAWAVE_API_URL="$REMNAWAVE_API_URL"
+REMNAWAVE_API_TOKEN="$REMNAWAVE_API_TOKEN"
+TG_ID_SOURCE="$TG_ID_SOURCE"
 CONF
   chmod 600 "$CONFIG_FILE"
 
@@ -448,10 +480,35 @@ find_user_by_ip() {
     | tail -1 || true
 }
 
+# Запрос данных пользователя из Remnawave API по ID (email из xray логов = ID пользователя)
+get_remnawave_user() {
+  local user_id="$1"
+  [[ -z "${REMNAWAVE_API_URL:-}" || -z "${REMNAWAVE_API_TOKEN:-}" ]] && return
+
+  curl -sS --max-time 10 \
+    -H "Authorization: Bearer ${REMNAWAVE_API_TOKEN}" \
+    -H "Content-Type: application/json" \
+    "${REMNAWAVE_API_URL}/api/users/by-id/${user_id}" 2>/dev/null || true
+}
+
+# Извлечение Telegram ID из ответа API в зависимости от настройки TG_ID_SOURCE
 extract_tg_id() {
-  local email="$1"
-  # Email format: idremna_idtelegram -> take the last part
-  echo "$email" | rev | cut -d'_' -f1 | rev
+  local api_response="$1"
+  local tg_id=""
+
+  if [[ "${TG_ID_SOURCE:-telegramId}" == "username" ]]; then
+    # Из поля username берём последнее значение после _
+    local username
+    username=$(echo "$api_response" | jq -r '.response.username // empty' 2>/dev/null)
+    if [[ -n "$username" ]]; then
+      tg_id=$(echo "$username" | rev | cut -d'_' -f1 | rev)
+    fi
+  else
+    # Из поля telegramId
+    tg_id=$(echo "$api_response" | jq -r '.response.telegramId // empty' 2>/dev/null)
+  fi
+
+  echo "$tg_id"
 }
 
 process_blocked() {
@@ -466,7 +523,7 @@ process_blocked() {
   # Skip if telegram is off
   [[ "${TG_ENABLED:-false}" == "true" ]] || return
 
-  # Find user in xray logs
+  # Find user identifier in xray logs
   local email
   email=$(find_user_by_ip "$src_ip")
 
@@ -475,11 +532,28 @@ process_blocked() {
     return
   fi
 
-  local tg_id
-  tg_id=$(extract_tg_id "$email")
+  # Запрашиваем данные пользователя из Remnawave API
+  local api_response
+  api_response=$(get_remnawave_user "$email")
 
-  if [[ -z "$tg_id" || "$tg_id" == "$email" ]]; then
-    log "Blocked ${src_ip}:${dst_port} — email '${email}' has no telegram ID"
+  if [[ -z "$api_response" ]]; then
+    log "Blocked ${src_ip}:${dst_port} — failed to get user '${email}' from Remnawave API"
+    return
+  fi
+
+  # Проверяем что ответ содержит данные пользователя
+  local has_response
+  has_response=$(echo "$api_response" | jq -r '.response // empty' 2>/dev/null)
+  if [[ -z "$has_response" || "$has_response" == "null" ]]; then
+    log "Blocked ${src_ip}:${dst_port} — user '${email}' not found in Remnawave panel"
+    return
+  fi
+
+  local tg_id
+  tg_id=$(extract_tg_id "$api_response")
+
+  if [[ -z "$tg_id" || "$tg_id" == "null" ]]; then
+    log "Blocked ${src_ip}:${dst_port} — user '${email}' has no telegram ID (source: ${TG_ID_SOURCE:-telegramId})"
     return
   fi
 
