@@ -375,6 +375,8 @@ IPSET_ANTISCANNER_TMP_NAME="${IPSET_ANTISCANNER_NAME}_tmp"
 PRECHECK_CHAIN="TRAF_GUARD_PRECHECK"
 CHAIN_NAME="FILTER_MOBILE_443"
 LOG_PREFIX="MOBILE443_BLOCK: "
+GOV_LOG_PREFIX="MOBILE443_TG_GOV: "
+ANTISCANNER_LOG_PREFIX="MOBILE443_TG_SCAN: "
 
 GOV_LIST_FILE="${LISTS_DIR}/government_networks.list"
 ANTISCANNER_LIST_FILE="${LISTS_DIR}/antiscanner.list"
@@ -556,9 +558,15 @@ prepare_chains() {
 
   if bool_is_true "$ENABLE_TRAF_GUARD"; then
     if bool_is_true "$ENABLE_TRAF_GUARD_GOVERNMENT"; then
+      iptables -A "$PRECHECK_CHAIN" -m set --match-set "$IPSET_GOV_NAME" src \
+        -m limit --limit 30/min --limit-burst 10 \
+        -j LOG --log-prefix "$GOV_LOG_PREFIX" --log-level 4
       iptables -A "$PRECHECK_CHAIN" -m set --match-set "$IPSET_GOV_NAME" src -j DROP
     fi
     if bool_is_true "$ENABLE_TRAF_GUARD_ANTISCANNER"; then
+      iptables -A "$PRECHECK_CHAIN" -m set --match-set "$IPSET_ANTISCANNER_NAME" src \
+        -m limit --limit 30/min --limit-burst 10 \
+        -j LOG --log-prefix "$ANTISCANNER_LOG_PREFIX" --log-level 4
       iptables -A "$PRECHECK_CHAIN" -m set --match-set "$IPSET_ANTISCANNER_NAME" src -j DROP
     fi
   fi
@@ -754,10 +762,12 @@ source /usr/local/sbin/mobile443-common.sh
 
 NOTIFIED_FILE="${STATE_DIR}/notified.txt"
 STATS_BLOCKED_FILE="${STATE_DIR}/stats_blocked.txt"
+TG_ALERTS_FILE="${STATE_DIR}/tg_alerts.txt"
 NOTIFY_COOLDOWN=21600
+ADMIN_ALERT_COOLDOWN=1800
 
 mkdir -p "$STATE_DIR"
-touch "$NOTIFIED_FILE" "$STATS_BLOCKED_FILE"
+touch "$NOTIFIED_FILE" "$STATS_BLOCKED_FILE" "$TG_ALERTS_FILE"
 
 should_notify() {
   local key="$1"
@@ -783,6 +793,33 @@ mark_notified() {
   grep -v "^${key} " "$NOTIFIED_FILE" > "$tmp_file" 2>/dev/null || true
   echo "${key} ${now}" >> "$tmp_file"
   install -m 0644 "$tmp_file" "$NOTIFIED_FILE"
+  rm -f "$tmp_file"
+}
+
+should_notify_admin_alert() {
+  local key="$1"
+  local now last_notified diff
+
+  now=$(date +%s)
+  last_notified=$(grep "^${key} " "$TG_ALERTS_FILE" 2>/dev/null | tail -1 | awk '{print $2}') || true
+
+  if [[ -z "$last_notified" ]]; then
+    return 0
+  fi
+
+  diff=$(( now - last_notified ))
+  [[ $diff -ge $ADMIN_ALERT_COOLDOWN ]]
+}
+
+mark_admin_alert() {
+  local key="$1"
+  local now tmp_file
+
+  now=$(date +%s)
+  tmp_file="$(mktemp)"
+  grep -v "^${key} " "$TG_ALERTS_FILE" > "$tmp_file" 2>/dev/null || true
+  echo "${key} ${now}" >> "$tmp_file"
+  install -m 0644 "$tmp_file" "$TG_ALERTS_FILE"
   rm -f "$tmp_file"
 }
 
@@ -872,6 +909,34 @@ process_blocked() {
   fi
 }
 
+process_traf_guard_alert() {
+  local src_ip="$1"
+  local dst_port="$2"
+  local reason="$3"
+  local key msg
+
+  echo "$(date '+%F %T') ${src_ip} ${dst_port} ${reason}" >> "$STATS_BLOCKED_FILE"
+
+  [[ "${ENABLE_TELEGRAM:-false}" == "true" ]] || return
+  [[ -n "${TG_ADMIN_ID:-}" ]] || return
+
+  key="${reason}_${src_ip}_${dst_port}"
+  if ! should_notify_admin_alert "$key"; then
+    log "Traffic Guard alert suppressed for ${src_ip}:${dst_port} (${reason})"
+    return
+  fi
+
+  msg="🚨 <b>Traffic Guard alert</b>
+
+Попытка подключения с IP <code>${src_ip}</code> к порту <code>${dst_port}</code>.
+
+Причина блокировки: <b>${reason}</b>."
+
+  send_tg "$TG_ADMIN_ID" "$msg"
+  mark_admin_alert "$key"
+  log "Traffic Guard alert sent for ${src_ip}:${dst_port} (${reason})"
+}
+
 get_log_stream() {
   if command -v journalctl >/dev/null 2>&1; then
     journalctl -kf --no-pager 2>/dev/null
@@ -888,9 +953,10 @@ get_log_stream() {
 log "Monitor started, watching for blocked connections..."
 
 get_log_stream | while IFS= read -r line; do
-  if [[ "$line" == *"$LOG_PREFIX"* ]]; then
+  if [[ "$line" == *"$LOG_PREFIX"* || "$line" == *"$GOV_LOG_PREFIX"* || "$line" == *"$ANTISCANNER_LOG_PREFIX"* ]]; then
     src_ip=""
     dst_port=""
+    reason=""
 
     if [[ "$line" =~ SRC=([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ]]; then
       src_ip="${BASH_REMATCH[1]}"
@@ -901,7 +967,15 @@ get_log_stream | while IFS= read -r line; do
     fi
 
     if [[ -n "$src_ip" && -n "$dst_port" ]]; then
-      process_blocked "$src_ip" "$dst_port"
+      if [[ "$line" == *"$GOV_LOG_PREFIX"* ]]; then
+        reason="government_networks"
+        process_traf_guard_alert "$src_ip" "$dst_port" "$reason"
+      elif [[ "$line" == *"$ANTISCANNER_LOG_PREFIX"* ]]; then
+        reason="antiscanner"
+        process_traf_guard_alert "$src_ip" "$dst_port" "$reason"
+      else
+        process_blocked "$src_ip" "$dst_port"
+      fi
     fi
   fi
 done

@@ -10,6 +10,7 @@
 
 - 🤖 уведомлять пользователей в Telegram о блокировке
 - 📊 отправлять ежедневную статистику админу
+- 🚨 отправлять админу alert при попытке доступа с IP из `traffic-guard` списков
 - 🌐 искать пользователя через `xray access.log`
 - 🧩 ходить в панель Remnawave за Telegram ID
 
@@ -149,6 +150,13 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
 - top IP
 - размер mobile allowlist
 - размер traffic-guard списков
+
+Дополнительно админ получает оперативный alert, если подключение прилетело из:
+
+- `government_networks.list`
+- `antiscanner.list`
+
+Для таких событий используются отдельные лог-префиксы в `iptables`, а бот шлёт уведомление с IP, портом и причиной блокировки.
 
 ## 🕛 Автообновление
 
