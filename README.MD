@@ -107,6 +107,21 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
   - источник Telegram ID
   - путь к `xray access.log`
 
+Обновление существующей установки:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) update
+```
+
+`update`:
+
+- смотрит текущий конфиг
+- определяет установленный профиль
+- делает backup текущего конфига
+- удаляет старый runtime проекта
+- ставит новую версию поверх со старой конфигурацией
+- сохраняет `asns.conf`, если он уже был настроен
+
 ### 2. Block-only режим
 
 ```bash
@@ -127,6 +142,14 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
    - только `government`
    - только `antiscanner`
 2. 🔌 Какие порты фильтровать через пробел
+
+Обновление block-only установки:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) update
+```
+
+Здесь тоже используется безопасный путь: `backup -> remove -> reinstall`.
 
 ## 📱 Telegram и Remnawave
 

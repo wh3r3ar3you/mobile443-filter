@@ -347,6 +347,106 @@ install_packages() {
   apt install -y "${packages[@]}"
 }
 
+reset_config_vars() {
+  unset INSTALL_PROFILE PORTS ENABLE_TRAF_GUARD ENABLE_TRAF_GUARD_GOVERNMENT \
+    ENABLE_TRAF_GUARD_ANTISCANNER ENABLE_MOBILE_ALLOW ENABLE_TELEGRAM TG_ENABLED \
+    TG_BOT_TOKEN TG_ADMIN_ID XRAY_ACCESS_LOG REMNAWAVE_API_URL REMNAWAVE_API_TOKEN \
+    TG_ID_SOURCE TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
+}
+
+load_config_if_exists() {
+  reset_config_vars
+  if [[ -f "$1" ]]; then
+    # shellcheck disable=SC1090
+    source "$1"
+    return 0
+  fi
+  return 1
+}
+
+runtime_install_from_config() {
+  mkdir -p "$BASE_DIR" "$STATE_DIR" "$BIN_DIR"
+  install_packages
+
+  if [[ "$INSTALL_PROFILE" == "full" ]]; then
+    write_default_asns
+  fi
+
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+
+  write_runtime_scripts
+  write_systemd_units
+  enable_services
+
+  echo "[*] Первичное обновление списков..."
+  if ! systemctl start mobile443-update.service; then
+    echo "[!] Онлайн-обновление не удалось, пробуем применить локальный кеш"
+    systemctl start mobile443-apply.service || true
+  fi
+
+  print_install_status
+}
+
+normalize_restored_config() {
+  local restored_config="$1"
+  local restored_asns="$2"
+  local target_profile="$3"
+  local ports enable_traf_guard enable_gov enable_antiscanner enable_mobile_allow
+  local enable_telegram tg_bot_token tg_admin_id xray_access_log remnawave_api_url
+  local remnawave_api_token tg_id_source
+
+  load_config_if_exists "$restored_config" || true
+
+  ports="${PORTS:-$DEFAULT_PORTS}"
+  enable_traf_guard="${ENABLE_TRAF_GUARD:-true}"
+  enable_gov="${ENABLE_TRAF_GUARD_GOVERNMENT:-$enable_traf_guard}"
+  enable_antiscanner="${ENABLE_TRAF_GUARD_ANTISCANNER:-$enable_traf_guard}"
+  enable_mobile_allow="${ENABLE_MOBILE_ALLOW:-true}"
+  enable_telegram="${ENABLE_TELEGRAM:-${TG_ENABLED:-false}}"
+  tg_bot_token="${TG_BOT_TOKEN:-}"
+  tg_admin_id="${TG_ADMIN_ID:-}"
+  xray_access_log="${XRAY_ACCESS_LOG:-}"
+  remnawave_api_url="${REMNAWAVE_API_URL:-}"
+  remnawave_api_token="${REMNAWAVE_API_TOKEN:-}"
+  tg_id_source="${TG_ID_SOURCE:-}"
+
+  if [[ "$target_profile" == "block-only" ]]; then
+    enable_traf_guard="true"
+    enable_mobile_allow="false"
+    enable_telegram="false"
+    tg_bot_token=""
+    tg_admin_id=""
+    xray_access_log=""
+    remnawave_api_url=""
+    remnawave_api_token=""
+    tg_id_source=""
+  fi
+
+  INSTALL_PROFILE="$target_profile"
+  write_config \
+    "$ports" \
+    "$enable_traf_guard" \
+    "$enable_gov" \
+    "$enable_antiscanner" \
+    "$enable_mobile_allow" \
+    "$enable_telegram" \
+    "$tg_bot_token" \
+    "$tg_admin_id" \
+    "$xray_access_log" \
+    "$remnawave_api_url" \
+    "$remnawave_api_token" \
+    "$tg_id_source"
+
+  if [[ "$target_profile" == "full" ]]; then
+    if [[ -s "$restored_asns" ]]; then
+      install -m 0644 "$restored_asns" "$ASNS_FILE"
+    else
+      write_default_asns
+    fi
+  fi
+}
+
 write_runtime_scripts() {
   cat > "${BIN_DIR}/mobile443-common.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1180,8 +1280,6 @@ print_install_status() {
 
 install_all() {
   require_root
-  mkdir -p "$BASE_DIR" "$STATE_DIR" "$BIN_DIR"
-  install_packages
 
   if [[ "$INSTALL_PROFILE" == "block-only" ]]; then
     setup_block_only
@@ -1190,20 +1288,7 @@ install_all() {
     write_default_asns
   fi
 
-  # shellcheck disable=SC1090
-  source "$CONFIG_FILE"
-
-  write_runtime_scripts
-  write_systemd_units
-  enable_services
-
-  echo "[*] Первичное обновление списков..."
-  if ! systemctl start mobile443-update.service; then
-    echo "[!] Онлайн-обновление не удалось, пробуем применить локальный кеш"
-    systemctl start mobile443-apply.service || true
-  fi
-
-  print_install_status
+  runtime_install_from_config
 }
 
 remove_all() {
@@ -1276,15 +1361,65 @@ remove_all() {
   echo "[+] Удалено."
 }
 
+update_all() {
+  require_root
+
+  local backup_dir backup_config backup_asns target_profile existing_profile requested_profile
+  requested_profile="$INSTALL_PROFILE"
+  backup_dir="$(mktemp -d)"
+  backup_config="${backup_dir}/config.conf"
+  backup_asns="${backup_dir}/asns.conf"
+
+  if [[ -f "$CONFIG_FILE" ]]; then
+    install -m 0600 "$CONFIG_FILE" "$backup_config"
+  fi
+  if [[ -f "$ASNS_FILE" ]]; then
+    install -m 0644 "$ASNS_FILE" "$backup_asns"
+  fi
+
+  if [[ ! -f "$backup_config" ]]; then
+    echo "[*] Текущая установка не найдена, запускаем обычную установку"
+    INSTALL_PROFILE="$requested_profile"
+    install_all
+    rm -rf "$backup_dir"
+    return
+  fi
+
+  load_config_if_exists "$backup_config" || true
+  existing_profile="${INSTALL_PROFILE:-}"
+
+  if [[ -n "$existing_profile" ]]; then
+    target_profile="$existing_profile"
+  else
+    target_profile="$requested_profile"
+    if [[ "${ENABLE_MOBILE_ALLOW:-true}" == "false" && "${ENABLE_TRAF_GUARD:-false}" == "true" ]]; then
+      target_profile="block-only"
+    fi
+  fi
+
+  echo "[*] Обновление mobile443"
+  echo "    Профиль: $target_profile"
+  echo "    Подход: backup config -> remove -> reinstall"
+
+  remove_all
+  normalize_restored_config "$backup_config" "$backup_asns" "$target_profile"
+  runtime_install_from_config
+
+  rm -rf "$backup_dir"
+}
+
 case "$ACTION" in
   install)
     install_all
+    ;;
+  update)
+    update_all
     ;;
   remove)
     remove_all
     ;;
   *)
-    echo "Использование: $0 [install|remove] [full|block-only]" >&2
+    echo "Использование: $0 [install|update|remove] [full|block-only]" >&2
     exit 1
     ;;
 esac
