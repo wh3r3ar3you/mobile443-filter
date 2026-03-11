@@ -1,16 +1,31 @@
-# mobile443
+# 🛡️ mobile443 v0.2
 
-Фильтр подключений к VPN-портам с двумя слоями проверки:
+Фильтр для VPN-портов, который теперь работает в два слоя:
 
-1. `traf_guard` DROP по внешним blocklist
-2. `mobile allow` ACCEPT по allowlist мобильных ASN
-3. дефолтный `DROP` для остальных IP на фильтруемых портах
+1. 🚫 `traf_guard` сначала дропает IP из blocklist
+2. 📶 затем `mobile allowlist` пускает только IP из мобильных ASN
+3. ⛔ всё остальное на указанных портах дропается
 
-В обычном режиме ставятся оба слоя. В `block-only` режиме ставится только `traf_guard` и остальной трафик не режется.
+При этом обычный режим установки по-прежнему умеет:
 
-## Схема обработки
+- 🤖 уведомлять пользователей в Telegram о блокировке
+- 📊 отправлять ежедневную статистику админу
+- 🌐 искать пользователя через `xray access.log`
+- 🧩 ходить в панель Remnawave за Telegram ID
 
-Основные сущности:
+То есть новая логика не заменяет старую, а ставится перед ней.
+
+## ✨ Что изменилось в v0.2
+
+- добавлен отдельный `DROP`-слой на базе `traffic-guard-lists`
+- `DROP` теперь всегда идёт раньше `ACCEPT` по мобильным ASN
+- появился отдельный `install_block_only.sh`
+- ежедневное обновление списков сведено в единый `systemd timer`
+- сохранена совместимость со старым `install.sh` и Telegram/Remnawave flow
+
+## 🧠 Как работает фильтрация
+
+Используются:
 
 - `ipset traf_guard_government`
 - `ipset traf_guard_antiscanner`
@@ -18,102 +33,153 @@
 - `chain TRAF_GUARD_PRECHECK`
 - `chain FILTER_MOBILE_443`
 
-Порядок правил в полном режиме:
+### Полный режим
 
 ```text
 INPUT/FORWARD/DOCKER-USER -> FILTER_MOBILE_443
 FILTER_MOBILE_443 -> TRAF_GUARD_PRECHECK
-TRAF_GUARD_PRECHECK: match traf_guard_government -> DROP
-TRAF_GUARD_PRECHECK: match traf_guard_antiscanner -> DROP
-FILTER_MOBILE_443: match allowed_mobile_443 -> ACCEPT
+TRAF_GUARD_PRECHECK: traf_guard_government -> DROP
+TRAF_GUARD_PRECHECK: traf_guard_antiscanner -> DROP
+FILTER_MOBILE_443: allowed_mobile_443 -> ACCEPT
 FILTER_MOBILE_443: LOG
 FILTER_MOBILE_443: DROP
 ```
 
-В `block-only` режиме:
+Иными словами:
+
+- если IP в `government_networks.list` -> `DROP`
+- если IP в `antiscanner.list` -> `DROP`
+- иначе если IP входит в мобильный allowlist -> `ACCEPT`
+- иначе -> `DROP`
+
+### Block-only режим
 
 ```text
 INPUT/FORWARD/DOCKER-USER -> FILTER_MOBILE_443
 FILTER_MOBILE_443 -> TRAF_GUARD_PRECHECK
-TRAF_GUARD_PRECHECK: match traf_guard_government -> DROP
-TRAF_GUARD_PRECHECK: match traf_guard_antiscanner -> DROP
+TRAF_GUARD_PRECHECK: traf_guard_government -> DROP
+TRAF_GUARD_PRECHECK: traf_guard_antiscanner -> DROP
 FILTER_MOBILE_443: RETURN
 ```
 
-## Источники списков
+Здесь режутся только IP из blocklist, а остальной трафик не ломается.
 
-По умолчанию используются:
+## 📦 Какие списки используются
+
+По умолчанию:
 
 - `TRAF_GUARD_BASE_URL="https://raw.githubusercontent.com/wh3r3ar3you/traffic-guard-lists/refs/heads/main/public"`
 - `GOV_LIST_URL="${TRAF_GUARD_BASE_URL}/government_networks.list"`
 - `ANTISCANNER_LIST_URL="${TRAF_GUARD_BASE_URL}/antiscanner.list"`
 
-Локальные файлы:
+Локально они хранятся в:
 
 - `/opt/mobile443/lists/government_networks.list`
 - `/opt/mobile443/lists/antiscanner.list`
-- `/var/lib/mobile443/prefixes.txt`
 
-Списки очищаются от пустых строк и комментариев, битые CIDR пропускаются с warning, затем ipset пересобирается через временные наборы и `ipset swap`.
+Списки:
 
-## Установка
+- очищаются от пустых строк и комментариев
+- проходят базовую проверку CIDR
+- не падают на единичных битых строках
+- обновляются атомарно
+- загружаются в `ipset` через временные наборы и `ipset swap`
 
-Обычный режим:
+## ⚙️ Режимы установки
+
+### 1. Обычный режим
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh)
 ```
 
-Этот режим:
+Что делает:
 
 - включает `traf_guard`
 - включает mobile ASN allowlist
-- опционально включает Telegram/Remnawave уведомления
+- спрашивает порты
+- по желанию включает Telegram уведомления
+- при включённом Telegram спрашивает:
+  - токен бота
+  - Telegram ID админа
+  - адрес панели Remnawave
+  - API токен панели
+  - источник Telegram ID
+  - путь к `xray access.log`
 
-Block-only режим:
+### 2. Block-only режим
 
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh)
 ```
 
-С указанием портов:
+Этот режим:
 
-```bash
-PORTS="443 8443 9443" bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh)
-```
+- не трогает Telegram
+- не спрашивает Remnawave API
+- не ищет `xray access.log`
+- не включает mobile ASN allowlist
 
-`install_block_only.sh` не спрашивает про Telegram, Remnawave, API токены и `xray access.log`.
-При этом он спрашивает:
+Но спрашивает:
 
-- какие traffic-guard листы включить
-- какие порты фильтровать через пробел
+1. 🧱 Какие blocklist включить:
+   - оба списка
+   - только `government`
+   - только `antiscanner`
+2. 🔌 Какие порты фильтровать через пробел
 
-## Удаление
+## 📱 Telegram и Remnawave
 
-Полный режим:
+В обычном режиме всё осталось как раньше.
 
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) remove
-```
+### Как определяется пользователь
 
-Block-only:
+1. `iptables` логирует заблокированное подключение
+2. по IP ищется пользователь в `xray access.log`
+3. из лога берётся `email` / ID пользователя
+4. по этому ID идёт запрос в Remnawave API
+5. из ответа берётся Telegram ID
+6. пользователю уходит уведомление о блокировке
 
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) remove
-```
+### Что получает админ
 
-Удаление чистит только сущности проекта:
+Раз в день отправляется статистика:
 
-- chain `FILTER_MOBILE_443`
-- chain `TRAF_GUARD_PRECHECK`
-- ipset проекта
-- systemd unit проекта
-- `/opt/mobile443`
-- `/var/lib/mobile443`
+- количество блокировок
+- число уникальных IP
+- top IP
+- размер mobile allowlist
+- размер traffic-guard списков
 
-## Конфиг
+## 🕛 Автообновление
 
-Основной конфиг: `/opt/mobile443/config.conf`
+Используется:
+
+- `mobile443-update.service`
+- `mobile443-update.timer`
+- `mobile443-apply.service`
+
+Таймер запускается ежедневно в `00:00`.
+
+В это обновление входят:
+
+- `government_networks.list`
+- `antiscanner.list`
+- mobile ASN allowlist, если он включён
+- пересборка `ipset`
+- приведение `iptables` chain к нужному виду без дублей
+
+Если включён Telegram, дополнительно ставятся:
+
+- `mobile443-monitor.service`
+- `mobile443-stats.service`
+- `mobile443-stats.timer`
+
+## 🧾 Конфиг
+
+Основной конфиг:
+
+- `/opt/mobile443/config.conf`
 
 Ключевые флаги:
 
@@ -129,11 +195,13 @@ GOV_LIST_URL="..."
 ANTISCANNER_LIST_URL="..."
 ```
 
-Типичные режимы:
+Примеры:
 
 ```bash
 # Обычная установка
 ENABLE_TRAF_GUARD="true"
+ENABLE_TRAF_GUARD_GOVERNMENT="true"
+ENABLE_TRAF_GUARD_ANTISCANNER="true"
 ENABLE_MOBILE_ALLOW="true"
 
 # Block-only
@@ -144,31 +212,9 @@ ENABLE_MOBILE_ALLOW="false"
 ENABLE_TELEGRAM="false"
 ```
 
-## Systemd
+## 🔍 Команды проверки
 
-Устанавливаются:
-
-- `mobile443-apply.service`
-- `mobile443-update.service`
-- `mobile443-update.timer`
-
-Если включён Telegram, дополнительно:
-
-- `mobile443-monitor.service`
-- `mobile443-stats.service`
-- `mobile443-stats.timer`
-
-`mobile443-update.service`:
-
-- обновляет `government_networks.list`
-- обновляет `antiscanner.list`
-- обновляет mobile ASN allowlist, если он включён
-- пересобирает ipset
-- пересобирает `iptables` chain без дублей
-
-## Команды проверки
-
-Проверка правил:
+### Iptables
 
 ```bash
 iptables-save | grep -E 'FILTER_MOBILE_443|TRAF_GUARD_PRECHECK|allowed_mobile_443|traf_guard_'
@@ -176,7 +222,7 @@ iptables -L TRAF_GUARD_PRECHECK -n -v --line-numbers
 iptables -L FILTER_MOBILE_443 -n -v --line-numbers
 ```
 
-Проверка ipset:
+### Ipset
 
 ```bash
 ipset list traf_guard_government | head -20
@@ -184,7 +230,7 @@ ipset list traf_guard_antiscanner | head -20
 ipset list allowed_mobile_443 | head -20
 ```
 
-Проверка systemd:
+### Systemd
 
 ```bash
 systemctl status mobile443-update.service --no-pager
@@ -192,7 +238,7 @@ systemctl status mobile443-update.timer --no-pager
 systemctl list-timers --all | grep mobile443
 ```
 
-Если включён Telegram:
+### Telegram monitor
 
 ```bash
 systemctl status mobile443-monitor.service --no-pager
@@ -200,7 +246,30 @@ systemctl status mobile443-stats.timer --no-pager
 journalctl -u mobile443-monitor.service -f --no-pager
 ```
 
-## Файлы
+## 🗑️ Удаление
+
+Обычный режим:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) remove
+```
+
+Block-only:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) remove
+```
+
+Удаляются только сущности проекта:
+
+- `FILTER_MOBILE_443`
+- `TRAF_GUARD_PRECHECK`
+- ipset проекта
+- systemd unit проекта
+- `/opt/mobile443`
+- `/var/lib/mobile443`
+
+## 📁 Основные файлы
 
 ```text
 /opt/mobile443/config.conf
