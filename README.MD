@@ -174,6 +174,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
 - размер mobile allowlist
 - размер traffic-guard списков
 
+И отдельно бот шлёт мгновенные Telegram-уведомления админу, если кто-то пытается подключиться с IP из сетей `traffic-guard`.
+
 Дополнительно админ получает оперативный alert, если подключение прилетело из:
 
 - `government_networks.list`
