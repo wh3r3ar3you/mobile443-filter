@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════
-#  mobile443 installer
+#  mobile443 block-only installer
 #  Использование:
-#    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh)
-#    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) remove
+#    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh)
+#    PORTS="443 8443" bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh)
+#    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) remove
 # ═══════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
@@ -20,7 +21,7 @@ NC='\033[0m'
 
 echo -e "${CYAN}${BOLD}"
 echo "╔═══════════════════════════════════════════════╗"
-echo "║     mobile443 - mobile ASN filter + DROP     ║"
+echo "║  mobile443 block-only - traffic guard DROP   ║"
 echo "╚═══════════════════════════════════════════════╝"
 echo -e "${NC}"
 
@@ -46,9 +47,10 @@ fi
 
 chmod +x "${INSTALL_DIR}/${SCRIPT_NAME}"
 echo -e "${GREEN}✅ Скрипт загружен${NC}"
+echo -e "${CYAN}ℹ️  Порты по умолчанию: ${PORTS:-443}${NC}"
 echo ""
 
 cd "$INSTALL_DIR"
-bash "${INSTALL_DIR}/${SCRIPT_NAME}" "$ACTION" full
+bash "${INSTALL_DIR}/${SCRIPT_NAME}" "$ACTION" block-only
 
 rm -rf "$INSTALL_DIR"
