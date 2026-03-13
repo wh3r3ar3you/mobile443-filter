@@ -287,6 +287,7 @@ write_default_asns() {
 
 # Beeline / VimpelCom
 3216
+16345
 
 # MegaFon core + related
 31133
@@ -333,6 +334,11 @@ write_default_asns() {
 
 # Rostelecom
 12389
+
+# T-mobile + Alfa-mobile
+205638
+214257
+202498
 EOF
 }
 
