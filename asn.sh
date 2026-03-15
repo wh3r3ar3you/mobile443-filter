@@ -97,6 +97,7 @@ write_config() {
   local remnawave_api_token="${11}"
   local tg_id_source="${12}"
   local tg_custom_message="${13:-}"
+  local tg_username_separator="${14:-}"
 
   mkdir -p "$BASE_DIR"
 
@@ -120,12 +121,13 @@ GOV_LIST_URL="${GOV_LIST_URL_DEFAULT}"
 ANTISCANNER_LIST_URL="${ANTISCANNER_LIST_URL_DEFAULT}"
 EOF
   printf "TG_CUSTOM_MESSAGE=%q\n" "$tg_custom_message" >> "$CONFIG_FILE"
+  printf "TG_USERNAME_SEPARATOR=%q\n" "$tg_username_separator" >> "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
 
 interactive_setup_full() {
   local ports tg_choice enable_telegram tg_bot_token tg_admin_id
-  local remnawave_api_url remnawave_api_token tg_id_source
+  local remnawave_api_url remnawave_api_token tg_id_source tg_username_separator
   local xray_access_log
 
   echo ""
@@ -171,13 +173,26 @@ interactive_setup_full() {
     echo "📋 Откуда брать Telegram ID пользователя?"
     echo "   1) Из поля telegramId пользователя в API Remnawave"
     echo "   2) Из поля username — последнее значение после _"
-    read -r -p "   Выберите (1 или 2): " tg_id_source_choice < /dev/tty
+    echo "   3) Из поля username — указать свой разделитель (или без него)"
+    read -r -p "   Выберите (1, 2 или 3): " tg_id_source_choice < /dev/tty
 
-    if [[ "$tg_id_source_choice" == "2" ]]; then
+    if [[ "$tg_id_source_choice" == "3" ]]; then
+      tg_id_source="username_custom"
+      echo "   Введите символ-разделитель, после которого идет telegramID (например : или _ или -)."
+      echo "   Оставьте пустым, если username и есть telegramID целиком:"
+      read -r -p "   > " tg_username_separator < /dev/tty
+      if [[ -z "$tg_username_separator" ]]; then
+        echo "   ✅ Telegram ID будет браться целиком из username"
+      else
+        echo "   ✅ Telegram ID будет извлекаться из username после последнего символа '${tg_username_separator}'"
+      fi
+    elif [[ "$tg_id_source_choice" == "2" ]]; then
       tg_id_source="username"
-      echo "   ✅ Telegram ID будет извлекаться из username"
+      tg_username_separator=""
+      echo "   ✅ Telegram ID будет извлекаться из username после последнего _"
     else
       tg_id_source="telegramId"
+      tg_username_separator=""
       echo "   ✅ Telegram ID будет браться из поля telegramId"
     fi
     echo ""
@@ -210,6 +225,7 @@ interactive_setup_full() {
     remnawave_api_token=""
     tg_id_source=""
     tg_custom_message=""
+    tg_username_separator=""
   fi
 
   write_config \
@@ -225,7 +241,8 @@ interactive_setup_full() {
     "${remnawave_api_url:-}" \
     "${remnawave_api_token:-}" \
     "${tg_id_source:-}" \
-    "${tg_custom_message:-}"
+    "${tg_custom_message:-}" \
+    "${tg_username_separator:-}"
 
   echo ""
   echo "💾 Конфигурация сохранена: $CONFIG_FILE"
@@ -276,6 +293,7 @@ setup_block_only() {
     "$enable_antiscanner" \
     "false" \
     "false" \
+    "" \
     "" \
     "" \
     "" \
@@ -386,7 +404,7 @@ reset_config_vars() {
   unset INSTALL_PROFILE PORTS ENABLE_TRAF_GUARD ENABLE_TRAF_GUARD_GOVERNMENT \
     ENABLE_TRAF_GUARD_ANTISCANNER ENABLE_MOBILE_ALLOW ENABLE_TELEGRAM TG_ENABLED \
     TG_BOT_TOKEN TG_ADMIN_ID XRAY_ACCESS_LOG REMNAWAVE_API_URL REMNAWAVE_API_TOKEN \
-    TG_ID_SOURCE TG_CUSTOM_MESSAGE TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
+    TG_ID_SOURCE TG_CUSTOM_MESSAGE TG_USERNAME_SEPARATOR TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
 }
 
 load_config_if_exists() {
@@ -429,7 +447,7 @@ normalize_restored_config() {
   local target_profile="$3"
   local ports enable_traf_guard enable_gov enable_antiscanner enable_mobile_allow
   local enable_telegram tg_bot_token tg_admin_id xray_access_log remnawave_api_url
-  local remnawave_api_token tg_id_source tg_custom_message
+  local remnawave_api_token tg_id_source tg_custom_message tg_username_separator
 
   load_config_if_exists "$restored_config" || true
 
@@ -446,6 +464,7 @@ normalize_restored_config() {
   remnawave_api_token="${REMNAWAVE_API_TOKEN:-}"
   tg_id_source="${TG_ID_SOURCE:-}"
   tg_custom_message="${TG_CUSTOM_MESSAGE:-}"
+  tg_username_separator="${TG_USERNAME_SEPARATOR:-}"
 
   if [[ "$target_profile" == "block-only" ]]; then
     enable_traf_guard="true"
@@ -458,6 +477,7 @@ normalize_restored_config() {
     remnawave_api_token=""
     tg_id_source=""
     tg_custom_message=""
+    tg_username_separator=""
   fi
 
   INSTALL_PROFILE="$target_profile"
@@ -474,7 +494,8 @@ normalize_restored_config() {
     "$remnawave_api_url" \
     "$remnawave_api_token" \
     "$tg_id_source" \
-    "$tg_custom_message"
+    "$tg_custom_message" \
+    "$tg_username_separator"
 
   if [[ "$target_profile" == "full" ]]; then
     if [[ -s "$restored_asns" ]]; then
@@ -1005,6 +1026,15 @@ extract_tg_id() {
     username=$(echo "$api_response" | jq -r '.response.username // empty' 2>/dev/null)
     if [[ -n "$username" ]]; then
       tg_id=$(echo "$username" | rev | cut -d'_' -f1 | rev)
+    fi
+  elif [[ "${TG_ID_SOURCE:-telegramId}" == "username_custom" ]]; then
+    username=$(echo "$api_response" | jq -r '.response.username // empty' 2>/dev/null)
+    if [[ -n "$username" ]]; then
+      if [[ -z "${TG_USERNAME_SEPARATOR:-}" ]]; then
+        tg_id="$username"
+      else
+        tg_id=$(echo "$username" | rev | cut -d"${TG_USERNAME_SEPARATOR}" -f1 | rev)
+      fi
     fi
   else
     tg_id=$(echo "$api_response" | jq -r '.response.telegramId // empty' 2>/dev/null)
