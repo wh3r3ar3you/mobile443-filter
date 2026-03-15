@@ -96,6 +96,7 @@ write_config() {
   local remnawave_api_url="${10}"
   local remnawave_api_token="${11}"
   local tg_id_source="${12}"
+  local tg_custom_message="${13:-}"
 
   mkdir -p "$BASE_DIR"
 
@@ -118,6 +119,7 @@ TRAF_GUARD_BASE_URL="${TRAF_GUARD_BASE_URL_DEFAULT}"
 GOV_LIST_URL="${GOV_LIST_URL_DEFAULT}"
 ANTISCANNER_LIST_URL="${ANTISCANNER_LIST_URL_DEFAULT}"
 EOF
+  printf "TG_CUSTOM_MESSAGE=%q\n" "$tg_custom_message" >> "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
 
@@ -180,6 +182,23 @@ interactive_setup_full() {
     fi
     echo ""
 
+    echo "💬 Какое сообщение отправлять пользователям при блокировке?"
+    echo "   1) Стандартное (рекомендуется)"
+    echo "   2) Свое кастомное сообщение"
+    read -r -p "   Выберите (1 или 2): " tg_msg_choice < /dev/tty
+
+    if [[ "$tg_msg_choice" == "2" ]]; then
+      echo "   Напишите текст кастомного сообщения (в одну строку, для переноса строки пишите \n)."
+      echo "   • Поддерживается HTML-разметка (например, <b>жирный текст</b>)."
+      echo "   • Доступна переменная: {ip} - IP-адрес пользователя, с которого была попытка подключения"
+      read -r -p "   > " tg_custom_message < /dev/tty
+      echo "   ✅ Кастомное сообщение сохранено."
+    else
+      tg_custom_message=""
+      echo "   ✅ Будет использовано стандартное сообщение."
+    fi
+    echo ""
+
     detect_xray_log
     xray_access_log="${XRAY_ACCESS_LOG:-}"
   else
@@ -190,6 +209,7 @@ interactive_setup_full() {
     remnawave_api_url=""
     remnawave_api_token=""
     tg_id_source=""
+    tg_custom_message=""
   fi
 
   write_config \
@@ -204,7 +224,8 @@ interactive_setup_full() {
     "${xray_access_log:-}" \
     "${remnawave_api_url:-}" \
     "${remnawave_api_token:-}" \
-    "${tg_id_source:-}"
+    "${tg_id_source:-}" \
+    "${tg_custom_message:-}"
 
   echo ""
   echo "💾 Конфигурация сохранена: $CONFIG_FILE"
@@ -255,6 +276,7 @@ setup_block_only() {
     "$enable_antiscanner" \
     "false" \
     "false" \
+    "" \
     "" \
     "" \
     "" \
@@ -335,10 +357,14 @@ write_default_asns() {
 # Rostelecom
 12389
 
+# Sevastar (Stavropol)
+35816
+
 # T-mobile + Alfa-mobile
 205638
 214257
 202498
+
 # Volna-Mobile
 203451
 203561
@@ -360,7 +386,7 @@ reset_config_vars() {
   unset INSTALL_PROFILE PORTS ENABLE_TRAF_GUARD ENABLE_TRAF_GUARD_GOVERNMENT \
     ENABLE_TRAF_GUARD_ANTISCANNER ENABLE_MOBILE_ALLOW ENABLE_TELEGRAM TG_ENABLED \
     TG_BOT_TOKEN TG_ADMIN_ID XRAY_ACCESS_LOG REMNAWAVE_API_URL REMNAWAVE_API_TOKEN \
-    TG_ID_SOURCE TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
+    TG_ID_SOURCE TG_CUSTOM_MESSAGE TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
 }
 
 load_config_if_exists() {
@@ -403,7 +429,7 @@ normalize_restored_config() {
   local target_profile="$3"
   local ports enable_traf_guard enable_gov enable_antiscanner enable_mobile_allow
   local enable_telegram tg_bot_token tg_admin_id xray_access_log remnawave_api_url
-  local remnawave_api_token tg_id_source
+  local remnawave_api_token tg_id_source tg_custom_message
 
   load_config_if_exists "$restored_config" || true
 
@@ -419,6 +445,7 @@ normalize_restored_config() {
   remnawave_api_url="${REMNAWAVE_API_URL:-}"
   remnawave_api_token="${REMNAWAVE_API_TOKEN:-}"
   tg_id_source="${TG_ID_SOURCE:-}"
+  tg_custom_message="${TG_CUSTOM_MESSAGE:-}"
 
   if [[ "$target_profile" == "block-only" ]]; then
     enable_traf_guard="true"
@@ -430,6 +457,7 @@ normalize_restored_config() {
     remnawave_api_url=""
     remnawave_api_token=""
     tg_id_source=""
+    tg_custom_message=""
   fi
 
   INSTALL_PROFILE="$target_profile"
@@ -445,7 +473,8 @@ normalize_restored_config() {
     "$xray_access_log" \
     "$remnawave_api_url" \
     "$remnawave_api_token" \
-    "$tg_id_source"
+    "$tg_id_source" \
+    "$tg_custom_message"
 
   if [[ "$target_profile" == "full" ]]; then
     if [[ -s "$restored_asns" ]]; then
@@ -1048,13 +1077,19 @@ process_blocked() {
   fi
 
   if should_notify "$tg_id"; then
-    msg="⚠️ <b>Внимание!</b>
+    if [[ -n "${TG_CUSTOM_MESSAGE:-}" ]]; then
+      msg="${TG_CUSTOM_MESSAGE//\{ip\}/${src_ip}}"
+      msg="$(printf '%b' "$msg")"
+    else
+      msg="⚠️ <b>Внимание!</b>
 
-Ваше подключение с IP <code>${src_ip}</code> было заблокировано.
+Соединение с IP <code>${src_ip}</code> было прервано. 
 
-Для подключения к VPN используйте <b>только мобильный интернет</b> (МТС, Билайн, МегаФон, Tele2, Ростелеком).
+Данный сервер предназначен <b>исключительно для обхода мобильных глушилок</b>, подключение через Wi-Fi не поддерживается, и соединения будут разрываться автоматически.
 
-Подключения с домашнего интернета, VPN и прокси не допускаются."
+Пожалуйста, переключитесь на <b>мобильный интернет</b> (МТС, Билайн, МегаФон, Tele2, Ростелеком, и др.) для стабильной работы."
+
+    fi
     send_tg "$tg_id" "$msg"
     mark_notified "$tg_id"
     log "Notified tg:${tg_id} (${email}) about blocked IP ${src_ip}"
