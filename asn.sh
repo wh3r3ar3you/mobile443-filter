@@ -96,6 +96,8 @@ write_config() {
   local remnawave_api_url="${10}"
   local remnawave_api_token="${11}"
   local tg_id_source="${12}"
+  local tg_custom_message="${13:-}"
+  local tg_username_separator="${14:-}"
 
   mkdir -p "$BASE_DIR"
 
@@ -118,12 +120,14 @@ TRAF_GUARD_BASE_URL="${TRAF_GUARD_BASE_URL_DEFAULT}"
 GOV_LIST_URL="${GOV_LIST_URL_DEFAULT}"
 ANTISCANNER_LIST_URL="${ANTISCANNER_LIST_URL_DEFAULT}"
 EOF
+  printf "TG_CUSTOM_MESSAGE=%q\n" "$tg_custom_message" >> "$CONFIG_FILE"
+  printf "TG_USERNAME_SEPARATOR=%q\n" "$tg_username_separator" >> "$CONFIG_FILE"
   chmod 600 "$CONFIG_FILE"
 }
 
 interactive_setup_full() {
   local ports tg_choice enable_telegram tg_bot_token tg_admin_id
-  local remnawave_api_url remnawave_api_token tg_id_source
+  local remnawave_api_url remnawave_api_token tg_id_source tg_username_separator
   local xray_access_log
 
   echo ""
@@ -169,14 +173,44 @@ interactive_setup_full() {
     echo "📋 Откуда брать Telegram ID пользователя?"
     echo "   1) Из поля telegramId пользователя в API Remnawave"
     echo "   2) Из поля username — последнее значение после _"
-    read -r -p "   Выберите (1 или 2): " tg_id_source_choice < /dev/tty
+    echo "   3) Из поля username — указать свой разделитель (или без него)"
+    read -r -p "   Выберите (1, 2 или 3): " tg_id_source_choice < /dev/tty
 
-    if [[ "$tg_id_source_choice" == "2" ]]; then
+    if [[ "$tg_id_source_choice" == "3" ]]; then
+      tg_id_source="username_custom"
+      echo "   Введите символ-разделитель, после которого идет telegramID (например : или _ или -)."
+      echo "   Оставьте пустым, если username и есть telegramID целиком:"
+      read -r -p "   > " tg_username_separator < /dev/tty
+      if [[ -z "$tg_username_separator" ]]; then
+        echo "   ✅ Telegram ID будет браться целиком из username"
+      else
+        echo "   ✅ Telegram ID будет извлекаться из username после последнего символа '${tg_username_separator}'"
+      fi
+    elif [[ "$tg_id_source_choice" == "2" ]]; then
       tg_id_source="username"
-      echo "   ✅ Telegram ID будет извлекаться из username"
+      tg_username_separator=""
+      echo "   ✅ Telegram ID будет извлекаться из username после последнего _"
     else
       tg_id_source="telegramId"
+      tg_username_separator=""
       echo "   ✅ Telegram ID будет браться из поля telegramId"
+    fi
+    echo ""
+
+    echo "💬 Какое сообщение отправлять пользователям при блокировке?"
+    echo "   1) Стандартное (рекомендуется)"
+    echo "   2) Свое кастомное сообщение"
+    read -r -p "   Выберите (1 или 2): " tg_msg_choice < /dev/tty
+
+    if [[ "$tg_msg_choice" == "2" ]]; then
+      echo "   Напишите текст кастомного сообщения (в одну строку, для переноса строки пишите \n)."
+      echo "   • Поддерживается HTML-разметка (например, <b>жирный текст</b>)."
+      echo "   • Доступна переменная: {ip} - IP-адрес пользователя, с которого была попытка подключения"
+      read -r -p "   > " tg_custom_message < /dev/tty
+      echo "   ✅ Кастомное сообщение сохранено."
+    else
+      tg_custom_message=""
+      echo "   ✅ Будет использовано стандартное сообщение."
     fi
     echo ""
 
@@ -190,6 +224,8 @@ interactive_setup_full() {
     remnawave_api_url=""
     remnawave_api_token=""
     tg_id_source=""
+    tg_custom_message=""
+    tg_username_separator=""
   fi
 
   write_config \
@@ -204,7 +240,9 @@ interactive_setup_full() {
     "${xray_access_log:-}" \
     "${remnawave_api_url:-}" \
     "${remnawave_api_token:-}" \
-    "${tg_id_source:-}"
+    "${tg_id_source:-}" \
+    "${tg_custom_message:-}" \
+    "${tg_username_separator:-}"
 
   echo ""
   echo "💾 Конфигурация сохранена: $CONFIG_FILE"
@@ -255,6 +293,8 @@ setup_block_only() {
     "$enable_antiscanner" \
     "false" \
     "false" \
+    "" \
+    "" \
     "" \
     "" \
     "" \
@@ -335,10 +375,14 @@ write_default_asns() {
 # Rostelecom
 12389
 
+# Sevastar (Stavropol)
+35816
+
 # T-mobile + Alfa-mobile
 205638
 214257
 202498
+
 # Volna-Mobile
 203451
 203561
@@ -360,7 +404,7 @@ reset_config_vars() {
   unset INSTALL_PROFILE PORTS ENABLE_TRAF_GUARD ENABLE_TRAF_GUARD_GOVERNMENT \
     ENABLE_TRAF_GUARD_ANTISCANNER ENABLE_MOBILE_ALLOW ENABLE_TELEGRAM TG_ENABLED \
     TG_BOT_TOKEN TG_ADMIN_ID XRAY_ACCESS_LOG REMNAWAVE_API_URL REMNAWAVE_API_TOKEN \
-    TG_ID_SOURCE TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
+    TG_ID_SOURCE TG_CUSTOM_MESSAGE TG_USERNAME_SEPARATOR TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
 }
 
 load_config_if_exists() {
@@ -403,7 +447,7 @@ normalize_restored_config() {
   local target_profile="$3"
   local ports enable_traf_guard enable_gov enable_antiscanner enable_mobile_allow
   local enable_telegram tg_bot_token tg_admin_id xray_access_log remnawave_api_url
-  local remnawave_api_token tg_id_source
+  local remnawave_api_token tg_id_source tg_custom_message tg_username_separator
 
   load_config_if_exists "$restored_config" || true
 
@@ -419,6 +463,8 @@ normalize_restored_config() {
   remnawave_api_url="${REMNAWAVE_API_URL:-}"
   remnawave_api_token="${REMNAWAVE_API_TOKEN:-}"
   tg_id_source="${TG_ID_SOURCE:-}"
+  tg_custom_message="${TG_CUSTOM_MESSAGE:-}"
+  tg_username_separator="${TG_USERNAME_SEPARATOR:-}"
 
   if [[ "$target_profile" == "block-only" ]]; then
     enable_traf_guard="true"
@@ -430,6 +476,8 @@ normalize_restored_config() {
     remnawave_api_url=""
     remnawave_api_token=""
     tg_id_source=""
+    tg_custom_message=""
+    tg_username_separator=""
   fi
 
   INSTALL_PROFILE="$target_profile"
@@ -445,7 +493,9 @@ normalize_restored_config() {
     "$xray_access_log" \
     "$remnawave_api_url" \
     "$remnawave_api_token" \
-    "$tg_id_source"
+    "$tg_id_source" \
+    "$tg_custom_message" \
+    "$tg_username_separator"
 
   if [[ "$target_profile" == "full" ]]; then
     if [[ -s "$restored_asns" ]]; then
@@ -480,6 +530,7 @@ IPSET_GOV_NAME="traf_guard_government"
 IPSET_GOV_TMP_NAME="${IPSET_GOV_NAME}_tmp"
 IPSET_ANTISCANNER_NAME="traf_guard_antiscanner"
 IPSET_ANTISCANNER_TMP_NAME="${IPSET_ANTISCANNER_NAME}_tmp"
+IPSET_DEFERRED_BLOCK_NAME="mobile443_deferred_block"
 
 PRECHECK_CHAIN="TRAF_GUARD_PRECHECK"
 CHAIN_NAME="FILTER_MOBILE_443"
@@ -549,6 +600,9 @@ ensure_ipsets() {
   fi
   if bool_is_true "$ENABLE_MOBILE_ALLOW"; then
     ensure_set_pair "$IPSET_ALLOW_NAME" "$IPSET_ALLOW_TMP_NAME"
+  fi
+  if bool_is_true "$ENABLE_TELEGRAM"; then
+    ipset create "$IPSET_DEFERRED_BLOCK_NAME" hash:ip family inet hashsize 4096 maxelem 65536 timeout 3600 -exist
   fi
 }
 
@@ -685,10 +739,22 @@ prepare_chains() {
   iptables -A "$CHAIN_NAME" -j "$PRECHECK_CHAIN"
 
   if bool_is_true "$ENABLE_MOBILE_ALLOW"; then
+    # 1) ACCEPT mobile ASN IPs immediately
     iptables -A "$CHAIN_NAME" -m set --match-set "$IPSET_ALLOW_NAME" src -j ACCEPT
-    iptables -A "$CHAIN_NAME" -m limit --limit 30/min --limit-burst 10 \
-      -j LOG --log-prefix "$LOG_PREFIX" --log-level 4
-    iptables -A "$CHAIN_NAME" -j DROP
+
+    if bool_is_true "$ENABLE_TELEGRAM"; then
+      # 2) DROP IPs that were already identified and deferred-blocked by the monitor
+      iptables -A "$CHAIN_NAME" -m set --match-set "$IPSET_DEFERRED_BLOCK_NAME" src -j DROP
+      # 3) LOG non-mobile IPs but let them through so xray can log the user email
+      iptables -A "$CHAIN_NAME" -m limit --limit 30/min --limit-burst 10 \
+        -j LOG --log-prefix "$LOG_PREFIX" --log-level 4
+      # No DROP here — connection passes to xray, monitor will add IP to deferred block
+    else
+      # Telegram disabled — immediate LOG + DROP as before
+      iptables -A "$CHAIN_NAME" -m limit --limit 30/min --limit-burst 10 \
+        -j LOG --log-prefix "$LOG_PREFIX" --log-level 4
+      iptables -A "$CHAIN_NAME" -j DROP
+    fi
   else
     iptables -A "$CHAIN_NAME" -j RETURN
   fi
@@ -961,11 +1027,44 @@ extract_tg_id() {
     if [[ -n "$username" ]]; then
       tg_id=$(echo "$username" | rev | cut -d'_' -f1 | rev)
     fi
+  elif [[ "${TG_ID_SOURCE:-telegramId}" == "username_custom" ]]; then
+    username=$(echo "$api_response" | jq -r '.response.username // empty' 2>/dev/null)
+    if [[ -n "$username" ]]; then
+      if [[ -z "${TG_USERNAME_SEPARATOR:-}" ]]; then
+        tg_id="$username"
+      else
+        tg_id=$(echo "$username" | rev | cut -d"${TG_USERNAME_SEPARATOR}" -f1 | rev)
+      fi
+    fi
   else
     tg_id=$(echo "$api_response" | jq -r '.response.telegramId // empty' 2>/dev/null)
   fi
 
   echo "$tg_id"
+}
+
+add_to_deferred_block() {
+  local ip="$1"
+  ipset add "$IPSET_DEFERRED_BLOCK_NAME" "$ip" timeout 3600 -exist 2>/dev/null || true
+  log "Added ${ip} to deferred block ipset for 1 hour"
+}
+
+find_user_by_ip_with_retry() {
+  local ip="$1"
+  local retries=5
+  local delay=1
+  local attempt email
+
+  for (( attempt=1; attempt<=retries; attempt++ )); do
+    email=$(find_user_by_ip "$ip")
+    if [[ -n "$email" ]]; then
+      echo "$email"
+      return
+    fi
+    if (( attempt < retries )); then
+      sleep "$delay"
+    fi
+  done
 }
 
 process_blocked() {
@@ -978,11 +1077,16 @@ process_blocked() {
 
   [[ "${ENABLE_TELEGRAM:-false}" == "true" ]] || return
 
-  email=$(find_user_by_ip "$src_ip")
+  # Wait for the IP to appear in xray access.log (connection is allowed through first)
+  email=$(find_user_by_ip_with_retry "$src_ip")
   if [[ -z "$email" ]]; then
-    log "Blocked ${src_ip}:${dst_port} - user not found in xray logs"
+    # Do not add to deferred block if NOT found. 
+    # This gives slow connections time to establish and appear in access.log on the next log trigger.
     return
   fi
+
+  # Add IP to deferred block immediately after identifying the user
+  add_to_deferred_block "$src_ip"
 
   api_response=$(get_remnawave_user "$email")
   if [[ -z "$api_response" ]]; then
@@ -1003,13 +1107,19 @@ process_blocked() {
   fi
 
   if should_notify "$tg_id"; then
-    msg="⚠️ <b>Внимание!</b>
+    if [[ -n "${TG_CUSTOM_MESSAGE:-}" ]]; then
+      msg="${TG_CUSTOM_MESSAGE//\{ip\}/${src_ip}}"
+      msg="$(printf '%b' "$msg")"
+    else
+      msg="⚠️ <b>Внимание!</b>
 
-Ваше подключение с IP <code>${src_ip}</code> было заблокировано.
+Соединение с IP <code>${src_ip}</code> было прервано. 
 
-Для подключения к VPN используйте <b>только мобильный интернет</b> (МТС, Билайн, МегаФон, Tele2, Ростелеком).
+Данный сервер предназначен <b>исключительно для обхода мобильных глушилок</b>, подключение через Wi-Fi не поддерживается, и соединения будут разрываться автоматически.
 
-Подключения с домашнего интернета, VPN и прокси не допускаются."
+Пожалуйста, переключитесь на <b>мобильный интернет</b> (МТС, Билайн, МегаФон, Tele2, Ростелеком, и др.) для стабильной работы."
+
+    fi
     send_tg "$tg_id" "$msg"
     mark_notified "$tg_id"
     log "Notified tg:${tg_id} (${email}) about blocked IP ${src_ip}"
@@ -1346,6 +1456,7 @@ remove_all() {
   ipset destroy traf_guard_government 2>/dev/null || true
   ipset destroy traf_guard_antiscanner_tmp 2>/dev/null || true
   ipset destroy traf_guard_antiscanner 2>/dev/null || true
+  ipset destroy mobile443_deferred_block 2>/dev/null || true
 
   echo "[*] Удаление systemd юнитов"
   rm -f /etc/systemd/system/mobile443-apply.service
