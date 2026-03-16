@@ -1,4 +1,4 @@
-# 🛡️ mobile443 v0.3.1
+# 🛡️ mobile443 v0.4
 
 Фильтр для VPN-портов, который теперь работает в два слоя:
 
@@ -14,6 +14,14 @@
 - 🌐 искать пользователя через `xray access.log`
 - 🧩 ходить в панель Remnawave за Telegram ID
 
+
+## ✨ Что изменилось в v0.4
+
+- обновлена логика пользовательских Telegram-уведомлений
+- добавлена возможность задать кастомный текст уведомления с подстановкой `{ip}`
+- добавлен расширенный режим извлечения Telegram ID из `username` с произвольным разделителем
+- изменена логика работы с `xray access.log`: первое подключение логируется, затем IP попадает во временный deferred block
+- добавлен ASN `AS35816` (Sevastar)
 
 ## ✨ Что изменилось в v0.3.1
 
@@ -185,14 +193,25 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
 
 В обычном режиме всё осталось как раньше.
 
+Дополнительно в `v0.4`:
+
+- можно выбрать источник Telegram ID:
+  - `telegramId` из API Remnawave
+  - последнюю часть `username` после `_`
+  - последнюю часть `username` после своего разделителя, либо весь `username` целиком
+- можно указать своё сообщение пользователю при блокировке
+- в кастомном сообщении поддерживается переменная `{ip}` и `\n` для переноса строки
+
 ### Как определяется пользователь
 
-1. `iptables` логирует заблокированное подключение
-2. по IP ищется пользователь в `xray access.log`
-3. из лога берётся `email` / ID пользователя
-4. по этому ID идёт запрос в Remnawave API
-5. из ответа берётся Telegram ID
-6. пользователю уходит уведомление о блокировке
+1. `iptables` логирует немобильное подключение
+2. соединение кратковременно пропускается до `xray`, чтобы запись успела появиться в `access.log`
+3. по IP ищется пользователь в `xray access.log`
+4. из лога берётся `email` / ID пользователя
+5. IP добавляется во временный `deferred block`
+6. по ID идёт запрос в Remnawave API
+7. из ответа берётся Telegram ID
+8. пользователю уходит уведомление о блокировке
 
 ### Что получает админ
 
@@ -251,6 +270,9 @@ ENABLE_TRAF_GUARD_GOVERNMENT="true|false"
 ENABLE_TRAF_GUARD_ANTISCANNER="true|false"
 ENABLE_MOBILE_ALLOW="true|false"
 ENABLE_TELEGRAM="true|false"
+TG_ID_SOURCE="telegramId|username|username_custom"
+TG_CUSTOM_MESSAGE="..."
+TG_USERNAME_SEPARATOR="_|:|-|..."
 PORTS="443 8443"
 TRAF_GUARD_BASE_URL="..."
 GOV_LIST_URL="..."
@@ -290,6 +312,7 @@ iptables -L FILTER_MOBILE_443 -n -v --line-numbers
 ipset list traf_guard_government | head -20
 ipset list traf_guard_antiscanner | head -20
 ipset list allowed_mobile_443 | head -20
+ipset list mobile443_deferred_block | head -20
 ```
 
 ### Systemd
