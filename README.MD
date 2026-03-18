@@ -106,7 +106,7 @@ FILTER_MOBILE_443: RETURN
 ```bash
 bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh)
 ```
-
+- ❗ Первичное обновление списков может занять от 2 до 5 минут ❗
 Что делает:
 
 - включает `traf_guard`
