@@ -386,6 +386,10 @@ write_default_asns() {
 # Volna-Mobile
 203451
 203561
+
+# MCS
+47204
+
 EOF
 }
 
