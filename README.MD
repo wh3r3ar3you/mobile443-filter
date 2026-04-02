@@ -22,7 +22,7 @@
 - добавлен расширенный режим извлечения Telegram ID из `username` с произвольным разделителем
 - изменена логика работы с `xray access.log`: первое подключение логируется, затем IP попадает во временный deferred block
 - добавлен ASN `AS35816` (Sevastar)
-- добавлены ASN `42842` (Beeline/vimpelcom), ASN `47204` (Luhansk mobile)
+- добавлены ASN `AS42842` (Beeline/vimpelcom), ASN `AS47204` (Luhansk mobile)
 
 ## ✨ Что изменилось в v0.3.1
 
