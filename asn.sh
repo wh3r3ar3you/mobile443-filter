@@ -324,9 +324,15 @@ write_default_asns() {
 
 # MTS
 8359
+13174
+21365
+30922
+34351
+
 
 # Beeline / VimpelCom
 3216
+16043
 16345
 42842
 
@@ -366,6 +372,9 @@ write_default_asns() {
 48092
 48190
 41330
+48092
+39374
+13116
 
 # Miranda
 201776
@@ -390,6 +399,8 @@ write_default_asns() {
 
 # MCS
 47204
+# DVF Irkutsk YOTA-mobile
+31133
 
 EOF
 }
