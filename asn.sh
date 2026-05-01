@@ -401,6 +401,8 @@ write_default_asns() {
 47204
 # DVF Irkutsk YOTA-mobile
 31133
+# MOTIV telecom
+31499
 
 EOF
 }
