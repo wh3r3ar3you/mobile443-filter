@@ -517,6 +517,24 @@ EOF
   chmod 644 "$MANUAL_ALLOW_FILE"
 }
 
+strip_legacy_rostelecom_from_asns() {
+  # Апгрейд поверх установки, где AS12389 ещё был активен в asns.conf:
+  # normalize_restored_config сохраняет старый asns.conf как есть, поэтому
+  # ASN нужно вычистить отдельно — asns_excluded.conf/static_networks.conf
+  # к этому моменту уже создаются с нуля корректно.
+  [[ -s "$ASNS_FILE" ]] || return
+  grep -qE '^12389[[:space:]]*$' "$ASNS_FILE" || return
+
+  echo "[*] Обнаружен активный AS12389 в существующем asns.conf — исключаем"
+  echo "    (заменяется static_networks.conf, ASN сохранён в asns_excluded.conf)"
+
+  local tmp
+  tmp="$(mktemp)"
+  grep -vE '^12389[[:space:]]*$' "$ASNS_FILE" > "$tmp"
+  install -m 0644 "$tmp" "$ASNS_FILE"
+  rm -f "$tmp"
+}
+
 install_packages() {
   local -a packages=(curl ipset iptables util-linux ca-certificates)
 
@@ -553,6 +571,7 @@ runtime_install_from_config() {
     write_default_asns
     write_default_asns_excluded
     write_default_static_networks
+    strip_legacy_rostelecom_from_asns
   fi
   ensure_excluded_networks_file
   ensure_manual_allow_file
