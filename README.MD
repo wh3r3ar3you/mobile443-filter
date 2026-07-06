@@ -1,5 +1,11 @@
 # 🛡️ mobile443 v0.5
 
+> ⚠️ **Список сетей Ростелекома (замена `AS12389`) пока в режиме
+> тестирования.** 31 сеть в `static_networks.conf` — это стартовый
+> курируемый набор, а не финальный. Если знаете более точные/актуальные
+> мобильные сети оператора (или нашли баг в другой части замены ASN) —
+> присылайте pull request, будем рады.
+
 Фильтр для VPN-портов, который теперь работает в два слоя:
 
 1. 🚫 `traf_guard` сначала дропает IP из blocklist
@@ -56,6 +62,11 @@
   - `mobile443-monitor.sh` больше не падает при отключённом Telegram —
     раньше он писал статистику блокировки и тут же завершался с ошибкой
     из-за `return` без явного кода после проверки `ENABLE_TELEGRAM`
+- traffic-guard списки (`government_networks.list`, `antiscanner.list`)
+  теперь при недоступности `raw.githubusercontent.com` (таймауты
+  встречаются на некоторых хостах/сетях) автоматически пробуют зеркало
+  на jsDelivr (`TRAF_GUARD_BASE_URL_FALLBACK`), прежде чем считать
+  обновление неудавшимся
 - `install.sh` / `install_block_only.sh` больше не требуют вручную ставить
   `curl` — используется `curl`, затем `wget`, и только если нет ни того,
   ни другого — скрипт сам поставит `curl` через `apt`
@@ -135,6 +146,17 @@ FILTER_MOBILE_443: RETURN
 - `TRAF_GUARD_BASE_URL="https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public"`
 - `GOV_LIST_URL="${TRAF_GUARD_BASE_URL}/government_networks.list"`
 - `ANTISCANNER_LIST_URL="${TRAF_GUARD_BASE_URL}/antiscanner.list"`
+
+Если основной источник (`raw.githubusercontent.com`) недоступен или
+таймаутится с хоста сервера (бывает на некоторых сетях), скрипт
+автоматически пробует зеркало на jsDelivr:
+
+- `TRAF_GUARD_BASE_URL_FALLBACK="https://cdn.jsdelivr.net/gh/shadow-netlab/traffic-guard-lists@main/public"`
+- `GOV_LIST_URL_FALLBACK`, `ANTISCANNER_LIST_URL_FALLBACK` — аналогично, от fallback-базы
+
+Список считается недоступным только если не получилось скачать **ни с
+одного** источника — тогда `mobile443-update.sh` завершается с ошибкой
+(без изменения текущих правил).
 
 Локально они хранятся в:
 
@@ -467,6 +489,9 @@ PORTS="443 8443"
 TRAF_GUARD_BASE_URL="..."
 GOV_LIST_URL="..."
 ANTISCANNER_LIST_URL="..."
+TRAF_GUARD_BASE_URL_FALLBACK="..."
+GOV_LIST_URL_FALLBACK="..."
+ANTISCANNER_LIST_URL_FALLBACK="..."
 ```
 
 Примеры:

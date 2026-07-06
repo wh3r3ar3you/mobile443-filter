@@ -21,6 +21,12 @@ TRAF_GUARD_BASE_URL_DEFAULT="https://raw.githubusercontent.com/shadow-netlab/tra
 GOV_LIST_URL_DEFAULT="${TRAF_GUARD_BASE_URL_DEFAULT}/government_networks.list"
 ANTISCANNER_LIST_URL_DEFAULT="${TRAF_GUARD_BASE_URL_DEFAULT}/antiscanner.list"
 
+# jsDelivr-зеркало GitHub — используется как fallback, если основной
+# raw.githubusercontent.com недоступен/таймаутится с хоста сервера.
+TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT="https://cdn.jsdelivr.net/gh/shadow-netlab/traffic-guard-lists@main/public"
+GOV_LIST_URL_FALLBACK_DEFAULT="${TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT}/government_networks.list"
+ANTISCANNER_LIST_URL_FALLBACK_DEFAULT="${TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT}/antiscanner.list"
+
 require_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
     echo "Run as root" >&2
@@ -124,6 +130,9 @@ TG_ID_SOURCE="$tg_id_source"
 TRAF_GUARD_BASE_URL="${TRAF_GUARD_BASE_URL_DEFAULT}"
 GOV_LIST_URL="${GOV_LIST_URL_DEFAULT}"
 ANTISCANNER_LIST_URL="${ANTISCANNER_LIST_URL_DEFAULT}"
+TRAF_GUARD_BASE_URL_FALLBACK="${TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT}"
+GOV_LIST_URL_FALLBACK="${GOV_LIST_URL_FALLBACK_DEFAULT}"
+ANTISCANNER_LIST_URL_FALLBACK="${ANTISCANNER_LIST_URL_FALLBACK_DEFAULT}"
 EOF
   printf "TG_CUSTOM_MESSAGE=%q\n" "$tg_custom_message" >> "$CONFIG_FILE"
   printf "TG_USERNAME_SEPARATOR=%q\n" "$tg_username_separator" >> "$CONFIG_FILE"
@@ -557,7 +566,8 @@ reset_config_vars() {
   unset INSTALL_PROFILE PORTS ENABLE_TRAF_GUARD ENABLE_TRAF_GUARD_GOVERNMENT \
     ENABLE_TRAF_GUARD_ANTISCANNER ENABLE_MOBILE_ALLOW ENABLE_TELEGRAM TG_ENABLED \
     TG_BOT_TOKEN TG_ADMIN_ID XRAY_ACCESS_LOG REMNAWAVE_API_URL REMNAWAVE_API_TOKEN \
-    TG_ID_SOURCE TG_CUSTOM_MESSAGE TG_USERNAME_SEPARATOR TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL
+    TG_ID_SOURCE TG_CUSTOM_MESSAGE TG_USERNAME_SEPARATOR TRAF_GUARD_BASE_URL GOV_LIST_URL ANTISCANNER_LIST_URL \
+    TRAF_GUARD_BASE_URL_FALLBACK GOV_LIST_URL_FALLBACK ANTISCANNER_LIST_URL_FALLBACK
 }
 
 load_config_if_exists() {
@@ -734,9 +744,15 @@ ANTISCANNER_LOG_PREFIX="MOBILE443_TG_SCAN: "
 GOV_LIST_FILE="${LISTS_DIR}/government_networks.list"
 ANTISCANNER_LIST_FILE="${LISTS_DIR}/antiscanner.list"
 
-TRAF_GUARD_BASE_URL="${TRAF_GUARD_BASE_URL:-https://raw.githubusercontent.com/wh3r3ar3you/traffic-guard-lists/refs/heads/main/public}"
+TRAF_GUARD_BASE_URL="${TRAF_GUARD_BASE_URL:-https://raw.githubusercontent.com/shadow-netlab/traffic-guard-lists/refs/heads/main/public}"
 GOV_LIST_URL="${GOV_LIST_URL:-${TRAF_GUARD_BASE_URL}/government_networks.list}"
 ANTISCANNER_LIST_URL="${ANTISCANNER_LIST_URL:-${TRAF_GUARD_BASE_URL}/antiscanner.list}"
+
+# jsDelivr-зеркало — используется как fallback, если основной источник
+# (raw.githubusercontent.com) недоступен или таймаутится с этого хоста.
+TRAF_GUARD_BASE_URL_FALLBACK="${TRAF_GUARD_BASE_URL_FALLBACK:-https://cdn.jsdelivr.net/gh/shadow-netlab/traffic-guard-lists@main/public}"
+GOV_LIST_URL_FALLBACK="${GOV_LIST_URL_FALLBACK:-${TRAF_GUARD_BASE_URL_FALLBACK}/government_networks.list}"
+ANTISCANNER_LIST_URL_FALLBACK="${ANTISCANNER_LIST_URL_FALLBACK:-${TRAF_GUARD_BASE_URL_FALLBACK}/antiscanner.list}"
 
 ENABLE_TRAF_GUARD="${ENABLE_TRAF_GUARD:-true}"
 ENABLE_TRAF_GUARD_GOVERNMENT="${ENABLE_TRAF_GUARD_GOVERNMENT:-true}"
@@ -925,6 +941,7 @@ download_and_validate_list() {
   local url="$1"
   local destination="$2"
   local label="$3"
+  local fallback_url="${4:-}"
   local raw_tmp clean_tmp line normalized valid_count old_count
 
   raw_tmp="$(mktemp)"
@@ -932,8 +949,18 @@ download_and_validate_list() {
   trap 'rm -f "$raw_tmp" "$clean_tmp"' RETURN
 
   log "Downloading ${label}: ${url}"
-  curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 \
-    "$url" -o "$raw_tmp"
+  if ! curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 "$url" -o "$raw_tmp"; then
+    if [[ -n "$fallback_url" ]]; then
+      log "WARN ${label}: основной источник недоступен, пробуем fallback: ${fallback_url}"
+      if ! curl -fsS --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 "$fallback_url" -o "$raw_tmp"; then
+        log "ERROR ${label}: не удалось скачать ни с основного источника, ни с fallback"
+        return 1
+      fi
+    else
+      log "ERROR ${label}: не удалось скачать список: ${url}"
+      return 1
+    fi
+  fi
 
   valid_count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -1176,12 +1203,12 @@ ensure_ipsets
 sync_manual_allow
 
 if bool_is_true "$ENABLE_TRAF_GUARD" && bool_is_true "$ENABLE_TRAF_GUARD_GOVERNMENT"; then
-  download_and_validate_list "$GOV_LIST_URL" "$GOV_LIST_FILE" "government_networks"
+  download_and_validate_list "$GOV_LIST_URL" "$GOV_LIST_FILE" "government_networks" "${GOV_LIST_URL_FALLBACK:-}"
   rebuild_ipset_from_file "$IPSET_GOV_NAME" "$IPSET_GOV_TMP_NAME" "$GOV_LIST_FILE" "government_networks"
 fi
 
 if bool_is_true "$ENABLE_TRAF_GUARD" && bool_is_true "$ENABLE_TRAF_GUARD_ANTISCANNER"; then
-  download_and_validate_list "$ANTISCANNER_LIST_URL" "$ANTISCANNER_LIST_FILE" "antiscanner"
+  download_and_validate_list "$ANTISCANNER_LIST_URL" "$ANTISCANNER_LIST_FILE" "antiscanner" "${ANTISCANNER_LIST_URL_FALLBACK:-}"
   rebuild_ipset_from_file "$IPSET_ANTISCANNER_NAME" "$IPSET_ANTISCANNER_TMP_NAME" "$ANTISCANNER_LIST_FILE" "antiscanner"
 fi
 
