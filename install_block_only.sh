@@ -31,16 +31,30 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
-if ! command -v curl >/dev/null 2>&1; then
-  echo -e "${CYAN}📦 Устанавливаем curl...${NC}"
+fetch_file() {
+  local url="$1"
+  local dest="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$dest"
+    return
+  fi
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$dest"
+    return
+  fi
+
+  echo -e "${CYAN}📦 Не найден ни curl, ни wget — устанавливаем curl...${NC}"
   apt update -y >/dev/null 2>&1 || true
   apt install -y curl >/dev/null 2>&1
-fi
+  curl -fsSL "$url" -o "$dest"
+}
 
 echo -e "${CYAN}📥 Скачиваем ${SCRIPT_NAME}...${NC}"
 mkdir -p "$INSTALL_DIR"
 
-if ! curl -fsSL "${REPO_RAW}/${SCRIPT_NAME}" -o "${INSTALL_DIR}/${SCRIPT_NAME}"; then
+if ! fetch_file "${REPO_RAW}/${SCRIPT_NAME}" "${INSTALL_DIR}/${SCRIPT_NAME}"; then
   echo -e "${RED}✖ Не удалось скачать скрипт.${NC}"
   echo -e "${RED}  Проверьте URL: ${REPO_RAW}/${SCRIPT_NAME}${NC}"
   exit 1

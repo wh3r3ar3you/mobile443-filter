@@ -9,6 +9,10 @@ STATE_DIR="/var/lib/mobile443"
 BIN_DIR="/usr/local/sbin"
 CONFIG_FILE="${BASE_DIR}/config.conf"
 ASNS_FILE="${BASE_DIR}/asns.conf"
+ASNS_EXCLUDED_FILE="${BASE_DIR}/asns_excluded.conf"
+STATIC_NETWORKS_FILE="${BASE_DIR}/static_networks.conf"
+EXCLUDED_NETWORKS_FILE="${BASE_DIR}/excluded_networks.conf"
+REPO_RAW_DEFAULT="https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main"
 
 DEFAULT_PORTS="443"
 
@@ -383,7 +387,11 @@ write_default_asns() {
 206673
 
 # Rostelecom
-12389
+# ВАЖНО: AS12389 исключён из полного пула — весь анонс ASN слишком широкий
+# и затрагивает домашний проводной broadband, а не только мобильные сети.
+# Вместо ASN используется точечный список сетей, см. static_networks.conf.
+# ASN сохранён в asns_excluded.conf и его можно вернуть в пул через
+# консоль `mobile443` (пункт меню "Вернуть ASN в полный пул").
 
 # Sevastar (Stavropol)
 35816
@@ -405,6 +413,89 @@ write_default_asns() {
 31499
 
 EOF
+}
+
+write_default_asns_excluded() {
+  if [[ -s "$ASNS_EXCLUDED_FILE" ]]; then
+    return
+  fi
+
+  cat > "$ASNS_EXCLUDED_FILE" <<'EOF'
+# === ASN, исключённые из полного пула asns.conf ===
+# Формат строки: "<ASN> # <комментарий>"
+# Такие ASN заменены точечным списком сетей в static_networks.conf,
+# т.к. весь анонс ASN слишком широкий (например, задевает домашний
+# проводной broadband, а не только мобильные сети).
+#
+# Вернуть ASN обратно в полный пул можно через консоль:
+#   sudo mobile443   ->   "Вернуть ASN в полный пул"
+
+12389 # Rostelecom — заменён static-списком (31 сеть), см. static_networks.conf
+EOF
+  chmod 644 "$ASNS_EXCLUDED_FILE"
+}
+
+write_default_static_networks() {
+  if [[ -s "$STATIC_NETWORKS_FILE" ]]; then
+    return
+  fi
+
+  cat > "$STATIC_NETWORKS_FILE" <<'EOF'
+# === Точечные (курируемые вручную) сети ===
+# Эти сети всегда добавляются в mobile-allowlist независимо от того,
+# какие ASN сейчас в пуле (asns.conf). Используется, когда весь ASN
+# целиком слишком широкий, и нужен только конкретный набор подсетей.
+
+# Rostelecom (заменяет исключённый AS12389, см. asns_excluded.conf)
+5.141.100.0/22
+5.141.192.0/22
+5.142.40.0/21
+83.219.13.0/24
+87.226.172.0/24
+87.226.203.0/24
+87.226.204.0/23
+87.226.206.0/24
+87.226.209.0/24
+87.226.210.0/23
+87.226.212.0/24
+87.226.218.0/24
+88.205.192.0/20
+89.20.97.0/24
+89.20.102.0/24
+89.204.112.0/20
+95.86.213.0/24
+95.86.214.0/23
+95.152.44.0/24
+95.152.62.0/24
+95.167.104.0/24
+176.119.160.0/21
+176.119.168.0/24
+176.119.173.0/24
+176.119.174.0/23
+178.47.161.0/24
+178.67.192.0/21
+188.254.122.0/23
+195.38.60.0/22
+212.120.169.0/24
+213.24.147.0/24
+217.107.106.0/24
+EOF
+  chmod 644 "$STATIC_NETWORKS_FILE"
+}
+
+ensure_excluded_networks_file() {
+  if [[ -f "$EXCLUDED_NETWORKS_FILE" ]]; then
+    return
+  fi
+
+  cat > "$EXCLUDED_NETWORKS_FILE" <<'EOF'
+# === Ручные исключения из mobile-allowlist ===
+# Любая сеть в этом файле никогда не попадёт в allowlist, даже если она
+# анонсируется одним из ASN пула или присутствует в static_networks.conf.
+# Формат: один CIDR на строку, комментарии через #.
+# Управляется через консоль: sudo mobile443 -> "Управление исключениями"
+EOF
+  chmod 644 "$EXCLUDED_NETWORKS_FILE"
 }
 
 install_packages() {
@@ -441,12 +532,16 @@ runtime_install_from_config() {
 
   if [[ "$INSTALL_PROFILE" == "full" ]]; then
     write_default_asns
+    write_default_asns_excluded
+    write_default_static_networks
   fi
+  ensure_excluded_networks_file
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
 
   write_runtime_scripts
+  write_cli_console
   write_systemd_units
   enable_services
 
@@ -463,6 +558,9 @@ normalize_restored_config() {
   local restored_config="$1"
   local restored_asns="$2"
   local target_profile="$3"
+  local restored_asns_excluded="$4"
+  local restored_static_networks="$5"
+  local restored_excluded_networks="$6"
   local ports enable_traf_guard enable_gov enable_antiscanner enable_mobile_allow
   local enable_telegram tg_bot_token tg_admin_id xray_access_log remnawave_api_url
   local remnawave_api_token tg_id_source tg_custom_message tg_username_separator
@@ -521,6 +619,24 @@ normalize_restored_config() {
     else
       write_default_asns
     fi
+
+    if [[ -s "$restored_asns_excluded" ]]; then
+      install -m 0644 "$restored_asns_excluded" "$ASNS_EXCLUDED_FILE"
+    else
+      write_default_asns_excluded
+    fi
+
+    if [[ -s "$restored_static_networks" ]]; then
+      install -m 0644 "$restored_static_networks" "$STATIC_NETWORKS_FILE"
+    else
+      write_default_static_networks
+    fi
+  fi
+
+  if [[ -f "$restored_excluded_networks" ]]; then
+    install -m 0644 "$restored_excluded_networks" "$EXCLUDED_NETWORKS_FILE"
+  else
+    ensure_excluded_networks_file
   fi
 }
 
@@ -539,6 +655,9 @@ BASE_DIR="/opt/mobile443"
 STATE_DIR="/var/lib/mobile443"
 LISTS_DIR="${BASE_DIR}/lists"
 ASNS_FILE="${BASE_DIR}/asns.conf"
+ASNS_EXCLUDED_FILE="${BASE_DIR}/asns_excluded.conf"
+STATIC_NETWORKS_FILE="${BASE_DIR}/static_networks.conf"
+EXCLUDED_NETWORKS_FILE="${BASE_DIR}/excluded_networks.conf"
 ALLOW_CACHE_FILE="${STATE_DIR}/prefixes.txt"
 LOCK_FILE="${STATE_DIR}/lock"
 
@@ -653,6 +772,73 @@ validate_ipv4_cidr() {
     [[ "$octet" =~ ^[0-9]+$ ]] || return 1
     (( octet >= 0 && octet <= 255 )) || return 1
   done
+}
+
+ip_to_int() {
+  local ip="$1" a b c d
+  local IFS=.
+  read -r a b c d <<< "$ip"
+  echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+# Возвращает успех, если сеть $2 (CIDR) полностью содержится в сети $1 (CIDR),
+# либо равна ей. Используется, чтобы вычесть исключённые сети из allowlist.
+cidr_contains() {
+  local outer="$1" inner="$2"
+  local outer_ip="${outer%/*}" outer_mask="${outer#*/}"
+  local inner_ip="${inner%/*}" inner_mask="${inner#*/}"
+  local outer_int inner_int mask_int
+
+  [[ "$outer_mask" =~ ^[0-9]+$ && "$inner_mask" =~ ^[0-9]+$ ]] || return 1
+  (( inner_mask >= outer_mask )) || return 1
+
+  outer_int="$(ip_to_int "$outer_ip")"
+  inner_int="$(ip_to_int "$inner_ip")"
+  if (( outer_mask == 0 )); then
+    mask_int=0
+  else
+    mask_int=$(( (0xFFFFFFFF << (32 - outer_mask)) & 0xFFFFFFFF ))
+  fi
+
+  (( (outer_int & mask_int) == (inner_int & mask_int) ))
+}
+
+# Убирает из $input все сети, попадающие под любую сеть из $exclusions_file
+# (точное совпадение или вложенная подсеть). Результат пишется в $output.
+filter_excluded_networks() {
+  local input="$1" exclusions_file="$2" output="$3"
+  local prefix ex excluded
+
+  if [[ ! -s "$exclusions_file" ]]; then
+    cp "$input" "$output"
+    return
+  fi
+
+  local -a exclusion_list=()
+  while IFS= read -r ex || [[ -n "$ex" ]]; do
+    ex="$(echo "$ex" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -n "$ex" ]] || continue
+    validate_ipv4_cidr "$ex" || continue
+    exclusion_list+=("$ex")
+  done < "$exclusions_file"
+
+  : > "$output"
+  if (( ${#exclusion_list[@]} == 0 )); then
+    cp "$input" "$output"
+    return
+  fi
+
+  while IFS= read -r prefix || [[ -n "$prefix" ]]; do
+    [[ -n "$prefix" ]] || continue
+    excluded="false"
+    for ex in "${exclusion_list[@]}"; do
+      if cidr_contains "$ex" "$prefix"; then
+        excluded="true"
+        break
+      fi
+    done
+    [[ "$excluded" == "true" ]] || echo "$prefix" >> "$output"
+  done < "$input"
 }
 
 download_and_validate_list() {
@@ -826,13 +1012,14 @@ source /usr/local/sbin/mobile443-common.sh
 
 TMP_RAW=""
 TMP_CLEAN=""
+TMP_FILTERED=""
 
 cleanup_tmp() {
-  rm -f "${TMP_RAW:-}" "${TMP_CLEAN:-}"
+  rm -f "${TMP_RAW:-}" "${TMP_CLEAN:-}" "${TMP_FILTERED:-}"
 }
 
 update_mobile_allowlist() {
-  local asn new_count old_count min_safe
+  local asn line new_count old_count min_safe
 
   [[ -f "$ASNS_FILE" ]] || {
     echo "ASN file not found: $ASNS_FILE" >&2
@@ -841,6 +1028,7 @@ update_mobile_allowlist() {
 
   TMP_RAW="$(mktemp)"
   TMP_CLEAN="$(mktemp)"
+  TMP_FILTERED="$(mktemp)"
   trap cleanup_tmp EXIT
 
   log "Fetching announced prefixes from RIPEstat"
@@ -853,9 +1041,21 @@ update_mobile_allowlist() {
       | jq -r '.data.prefixes[]?.prefix // empty' >> "$TMP_RAW" || true
   done < "$ASNS_FILE"
 
+  if [[ -f "$STATIC_NETWORKS_FILE" ]]; then
+    log "Merging curated static networks: $STATIC_NETWORKS_FILE"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="$(echo "$line" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [[ -n "$line" ]] || continue
+      echo "$line" >> "$TMP_RAW"
+    done < "$STATIC_NETWORKS_FILE"
+  fi
+
   sort -Vu "$TMP_RAW" \
     | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$' \
     > "$TMP_CLEAN" || true
+
+  filter_excluded_networks "$TMP_CLEAN" "$EXCLUDED_NETWORKS_FILE" "$TMP_FILTERED"
+  cp "$TMP_FILTERED" "$TMP_CLEAN"
 
   new_count="$(count_lines "$TMP_CLEAN")"
   old_count="$(count_lines "$ALLOW_CACHE_FILE")"
@@ -1270,6 +1470,613 @@ EOF
   chmod +x "${BIN_DIR}/mobile443-stats.sh"
 }
 
+write_cli_console() {
+  cat > "${BIN_DIR}/mobile443" <<'EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+source /usr/local/sbin/mobile443-common.sh
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo -e "${RED}✖ Запустите от root: sudo mobile443${NC}"
+  exit 1
+fi
+
+pause() {
+  echo ""
+  read -r -p "Нажмите Enter, чтобы вернуться в меню..." _ < /dev/tty || true
+}
+
+print_header() {
+  clear
+  echo -e "${CYAN}${BOLD}"
+  echo "╔═══════════════════════════════════════════════╗"
+  echo "║             mobile443 — консоль                ║"
+  echo "╚═══════════════════════════════════════════════╝"
+  echo -e "${NC}"
+}
+
+strip_comment() {
+  echo "$1" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+set_config_key() {
+  local key="$1" value="$2" quoted tmp
+  quoted="$(printf '%q' "$value")"
+  tmp="$(mktemp)"
+  grep -v "^${key}=" "$CONFIG_FILE" > "$tmp" 2>/dev/null || true
+  echo "${key}=${quoted}" >> "$tmp"
+  install -m 0600 "$tmp" "$CONFIG_FILE"
+  rm -f "$tmp"
+}
+
+reload_config() {
+  # shellcheck disable=SC1090
+  [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+}
+
+# ---------- 1) Обновить списки ----------
+action_update_lists() {
+  print_header
+  echo -e "${CYAN}🔄 Запускаем обновление списков (ASN + traffic-guard)...${NC}"
+  echo ""
+  if systemctl start mobile443-update.service; then
+    echo -e "${GREEN}✅ Обновление выполнено успешно.${NC}"
+  else
+    echo -e "${RED}✖ Обновление завершилось с ошибкой:${NC}"
+  fi
+  echo ""
+  journalctl -u mobile443-update.service -n 15 --no-pager 2>/dev/null || true
+  pause
+}
+
+# ---------- 2) Вернуть ASN в полный пул ----------
+action_restore_asn() {
+  print_header
+  echo -e "${CYAN}↩️  Возврат ASN в полный пул${NC}"
+  echo ""
+
+  local -a entries=()
+  if [[ -f "$ASNS_EXCLUDED_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -n "$(strip_comment "$line")" ]] || continue
+      entries+=("$line")
+    done < "$ASNS_EXCLUDED_FILE"
+  fi
+
+  if (( ${#entries[@]} == 0 )); then
+    echo "Список исключённых ASN пуст — возвращать нечего."
+    pause
+    return
+  fi
+
+  echo "Исключённые ASN:"
+  local i
+  for i in "${!entries[@]}"; do
+    echo "  $((i+1))) ${entries[$i]}"
+  done
+  echo "  0) Отмена"
+  echo ""
+  read -r -p "Выберите номер ASN для возврата в пул: " choice < /dev/tty
+  [[ -z "$choice" || "$choice" == "0" ]] && return
+
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#entries[@]} )); then
+    echo -e "${RED}Некорректный выбор${NC}"
+    pause
+    return
+  fi
+
+  local selected="${entries[$((choice-1))]}"
+  local asn_num
+  asn_num="$(echo "$selected" | awk '{print $1}')"
+
+  {
+    echo ""
+    echo "# Возвращён в пул из asns_excluded.conf ($(date '+%F %T'))"
+    echo "$asn_num"
+  } >> "$ASNS_FILE"
+
+  local tmp
+  tmp="$(mktemp)"
+  grep -vF "$selected" "$ASNS_EXCLUDED_FILE" > "$tmp" 2>/dev/null || true
+  install -m 0644 "$tmp" "$ASNS_EXCLUDED_FILE"
+  rm -f "$tmp"
+
+  echo -e "${GREEN}✅ AS${asn_num} возвращён в asns.conf.${NC}"
+  echo ""
+  read -r -p "Обновить списки сейчас, чтобы применить изменения? (y/n): " run_now < /dev/tty
+  if [[ "${run_now,,}" == "y" ]]; then
+    systemctl start mobile443-update.service || true
+  fi
+  pause
+}
+
+# ---------- 3) Управление исключениями сетей ----------
+action_manage_exclusions() {
+  while true; do
+    print_header
+    echo -e "${CYAN}🚫 Управление исключениями (excluded_networks.conf)${NC}"
+    echo ""
+
+    [[ -f "$EXCLUDED_NETWORKS_FILE" ]] || touch "$EXCLUDED_NETWORKS_FILE"
+
+    local -a entries=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -n "$(strip_comment "$line")" ]] || continue
+      entries+=("$line")
+    done < "$EXCLUDED_NETWORKS_FILE"
+
+    if (( ${#entries[@]} > 0 )); then
+      echo "Текущие исключения:"
+      local i
+      for i in "${!entries[@]}"; do
+        echo "  $((i+1))) ${entries[$i]}"
+      done
+    else
+      echo "Список исключений пуст."
+    fi
+
+    echo ""
+    echo "  a) Добавить сеть в исключение"
+    (( ${#entries[@]} > 0 )) && echo "  r) Удалить сеть из исключений"
+    echo "  0) Назад"
+    echo ""
+    read -r -p "Выберите действие: " action < /dev/tty
+
+    case "$action" in
+      a|A)
+        echo ""
+        read -r -p "Введите CIDR сети для исключения (например 10.0.0.0/24): " new_cidr < /dev/tty
+        new_cidr="$(strip_comment "$new_cidr")"
+        if ! validate_ipv4_cidr "$new_cidr"; then
+          echo -e "${RED}✖ Некорректный CIDR${NC}"
+          pause
+          continue
+        fi
+        read -r -p "Комментарий (необязательно): " comment < /dev/tty
+        if [[ -n "$comment" ]]; then
+          echo "${new_cidr} # ${comment}" >> "$EXCLUDED_NETWORKS_FILE"
+        else
+          echo "${new_cidr}" >> "$EXCLUDED_NETWORKS_FILE"
+        fi
+        echo -e "${GREEN}✅ Сеть ${new_cidr} добавлена в исключения.${NC}"
+        echo ""
+        read -r -p "Обновить списки сейчас? (y/n): " run_now < /dev/tty
+        [[ "${run_now,,}" == "y" ]] && { systemctl start mobile443-update.service || true; }
+        pause
+        ;;
+      r|R)
+        (( ${#entries[@]} == 0 )) && continue
+        echo ""
+        read -r -p "Номер исключения для удаления: " del_choice < /dev/tty
+        if ! [[ "$del_choice" =~ ^[0-9]+$ ]] || (( del_choice < 1 || del_choice > ${#entries[@]} )); then
+          echo -e "${RED}Некорректный выбор${NC}"
+          pause
+          continue
+        fi
+        local target="${entries[$((del_choice-1))]}"
+        local tmp
+        tmp="$(mktemp)"
+        grep -vF "$target" "$EXCLUDED_NETWORKS_FILE" > "$tmp" 2>/dev/null || true
+        install -m 0644 "$tmp" "$EXCLUDED_NETWORKS_FILE"
+        rm -f "$tmp"
+        echo -e "${GREEN}✅ Исключение удалено.${NC}"
+        echo ""
+        read -r -p "Обновить списки сейчас? (y/n): " run_now < /dev/tty
+        [[ "${run_now,,}" == "y" ]] && { systemctl start mobile443-update.service || true; }
+        pause
+        ;;
+      0|"") return ;;
+      *) ;;
+    esac
+  done
+}
+
+# ---------- 4) Статус и диагностика ----------
+action_status() {
+  print_header
+  echo -e "${CYAN}🩺 Статус и диагностика${NC}"
+  echo ""
+
+  echo -e "${BOLD}Конфигурация (${CONFIG_FILE}):${NC}"
+  echo "  Порты: ${PORTS:-443}"
+  echo "  Traffic Guard: ${ENABLE_TRAF_GUARD:-false} (government=${ENABLE_TRAF_GUARD_GOVERNMENT:-false}, antiscanner=${ENABLE_TRAF_GUARD_ANTISCANNER:-false})"
+  echo "  Mobile allowlist: ${ENABLE_MOBILE_ALLOW:-false}"
+  echo "  Telegram/Remnawave: ${ENABLE_TELEGRAM:-false}"
+  echo ""
+
+  echo -e "${BOLD}Пулы сетей:${NC}"
+  echo "  ASN в пуле (asns.conf): $(grep -cE '^[0-9]+' "$ASNS_FILE" 2>/dev/null || echo 0)"
+  echo "  Исключённые ASN (asns_excluded.conf): $(grep -cE '^[0-9]+' "$ASNS_EXCLUDED_FILE" 2>/dev/null || echo 0)"
+  echo "  Точечные сети (static_networks.conf): $(grep -cE '^[0-9]+\.' "$STATIC_NETWORKS_FILE" 2>/dev/null || echo 0)"
+  echo "  Ручные исключения (excluded_networks.conf): $(grep -cE '^[0-9]+\.' "$EXCLUDED_NETWORKS_FILE" 2>/dev/null || echo 0)"
+  echo ""
+
+  echo -e "${BOLD}Ipset:${NC}"
+  local set_name cnt
+  for set_name in "$IPSET_ALLOW_NAME" "$IPSET_GOV_NAME" "$IPSET_ANTISCANNER_NAME" "$IPSET_DEFERRED_BLOCK_NAME"; do
+    if cnt=$(ipset list "$set_name" 2>/dev/null | awk '/Number of entries/ {print $4}') && [[ -n "$cnt" ]]; then
+      echo "  $set_name: ${cnt} записей"
+    else
+      echo "  $set_name: не создан"
+    fi
+  done
+  echo ""
+
+  echo -e "${BOLD}Iptables (счётчики пакетов):${NC}"
+  iptables -L "$CHAIN_NAME" -n -v 2>/dev/null | head -10 || echo "  chain $CHAIN_NAME не найден"
+  echo ""
+
+  echo -e "${BOLD}Systemd:${NC}"
+  local unit
+  for unit in mobile443-update.timer mobile443-update.service mobile443-apply.service \
+              mobile443-monitor.service mobile443-stats.timer; do
+    if systemctl cat "$unit" >/dev/null 2>&1; then
+      printf "  %-32s %s\n" "$unit" "$(systemctl is-active "$unit" 2>/dev/null || echo unknown)"
+    fi
+  done
+  echo ""
+
+  local last_update
+  last_update=$(systemctl show mobile443-update.service -p ActiveEnterTimestamp --value 2>/dev/null || true)
+  echo "  Последнее успешное обновление: ${last_update:-нет данных}"
+
+  pause
+}
+
+# ---------- 5) Статистика (как отправляет бот) ----------
+action_show_stats() {
+  print_header
+  echo -e "${CYAN}📊 Статистика mobile443${NC}"
+  echo ""
+
+  if [[ "${ENABLE_TELEGRAM:-false}" != "true" ]]; then
+    echo "Telegram/Remnawave интеграция не настроена, поэтому сбор статистики блокировок не ведётся."
+    echo "Настройте интеграцию в пункте меню \"Настроить Telegram/Remnawave\"."
+    pause
+    return
+  fi
+
+  local stats_file="${STATE_DIR}/stats_blocked.txt"
+  local total_blocked=0 unique_ips=0 top_ips=""
+
+  if [[ -f "$stats_file" && -s "$stats_file" ]]; then
+    total_blocked=$(wc -l < "$stats_file" | tr -d ' ')
+    unique_ips=$(awk '{print $3}' "$stats_file" | sort -u | wc -l | tr -d ' ')
+    top_ips=$(awk '{print $3}' "$stats_file" | sort | uniq -c | sort -rn | head -10)
+  fi
+
+  local allow_count gov_count antiscanner_count
+  allow_count=$(ipset list "$IPSET_ALLOW_NAME" 2>/dev/null | awk '/Number of entries/ {print $4}')
+  gov_count=$(ipset list "$IPSET_GOV_NAME" 2>/dev/null | awk '/Number of entries/ {print $4}')
+  antiscanner_count=$(ipset list "$IPSET_ANTISCANNER_NAME" 2>/dev/null | awk '/Number of entries/ {print $4}')
+
+  echo "📅 Период: с последней отправки/сброса статистики"
+  echo ""
+  echo "🚫 Заблокировано соединений: ${total_blocked}"
+  echo "🌐 Уникальных заблокированных IP: ${unique_ips}"
+  echo "📋 Mobile allowlist: ${allow_count:-N/A}"
+  echo "🛑 Traffic Guard government: ${gov_count:-N/A}"
+  echo "🛑 Traffic Guard antiscanner: ${antiscanner_count:-N/A}"
+  echo "🔌 Порты: ${PORTS:-443}"
+
+  if [[ -n "$top_ips" ]]; then
+    echo ""
+    echo "🔝 Топ заблокированных IP:"
+    echo "$top_ips"
+  fi
+
+  echo ""
+  echo "Это тот же отчёт, что бот раз в день шлёт админу в Telegram (mobile443-stats.timer, 09:00 UTC)."
+  echo ""
+  read -r -p "Отправить этот отчёт в Telegram прямо сейчас? (y/n): " send_now < /dev/tty
+  if [[ "${send_now,,}" == "y" ]]; then
+    systemctl start mobile443-stats.service && echo -e "${GREEN}✅ Отправлено.${NC}" || echo -e "${RED}✖ Не удалось отправить${NC}"
+  fi
+  pause
+}
+
+detect_xray_log_cli() {
+  echo "🔍 Поиск access.log от xray/remnanode..." >&2
+  local -a candidates=(
+    "/var/log/remnanode/access.log"
+    "/var/log/remnanode/xray/access.log"
+    "/var/lib/remnanode/access.log"
+    "/var/lib/remnanode/xray/access.log"
+    "/opt/remnanode/access.log"
+    "/var/log/xray/access.log"
+    "/usr/local/etc/xray/access.log"
+  )
+  local path
+  for path in "${candidates[@]}"; do
+    if [[ -f "$path" ]]; then
+      echo "   ✅ Найден: $path" >&2
+      echo "$path"
+      return
+    fi
+  done
+
+  local found
+  found=$(find / -maxdepth 5 \( -name "access.log" -o -name "access_log" \) \
+    \( -path "*xray*" -o -path "*remna*" \) 2>/dev/null | head -5) || true
+
+  if [[ -n "$found" ]]; then
+    echo "   Найдены файлы:" >&2
+    echo "$found" | while IFS= read -r f; do echo "     - $f" >&2; done
+    echo "" >&2
+    read -r -p "   Введите путь или Enter для первого найденного: " user_path < /dev/tty
+    echo "${user_path:-$(echo "$found" | head -1)}"
+    return
+  fi
+
+  echo "   ⚠️  Автоматически не найден." >&2
+  read -r -p "   Введите полный путь к access.log xray: " manual_path < /dev/tty
+  echo "$manual_path"
+}
+
+write_telegram_units_cli() {
+  cat > /etc/systemd/system/mobile443-monitor.service <<'UNIT'
+[Unit]
+Description=Monitor blocked connections and send Telegram notifications
+After=network-online.target mobile443-apply.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/mobile443-monitor.sh
+User=root
+Group=root
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  cat > /etc/systemd/system/mobile443-stats.service <<'UNIT'
+[Unit]
+Description=Send daily mobile443 stats to Telegram admin
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/mobile443-stats.sh
+User=root
+Group=root
+UNIT
+
+  cat > /etc/systemd/system/mobile443-stats.timer <<'UNIT'
+[Unit]
+Description=Daily mobile443 stats report at 09:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 09:00:00
+Persistent=true
+Unit=mobile443-stats.service
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
+# ---------- 6) Настроить Telegram / Remnawave ----------
+action_configure_telegram() {
+  print_header
+  echo -e "${CYAN}🤖 Настройка Telegram / Remnawave${NC}"
+  echo ""
+
+  if [[ "${ENABLE_MOBILE_ALLOW:-true}" != "true" ]]; then
+    echo -e "${YELLOW}⚠️  Установка в block-only режиме (mobile allowlist выключен).${NC}"
+    echo "    Уведомления пользователям при блокировке mobile-фильтром работать не будут,"
+    echo "    но Traffic Guard alert админу и статистика продолжат работать."
+    echo ""
+  fi
+
+  if [[ "${ENABLE_TELEGRAM:-false}" == "true" ]]; then
+    echo "Telegram/Remnawave уже настроены для этой установки."
+    read -r -p "Перенастроить заново? (y/n): " redo < /dev/tty
+    if [[ "${redo,,}" != "y" ]]; then
+      return
+    fi
+  fi
+
+  local tg_bot_token tg_admin_id remnawave_api_url remnawave_api_token
+  local tg_id_source tg_username_separator tg_custom_message xray_access_log tg_id_choice tg_msg_choice
+
+  echo ""
+  echo "🤖 Токен Telegram бота:"
+  read -r -p "   > " tg_bot_token < /dev/tty
+  echo ""
+  echo "👤 Telegram ID администратора (для статистики и алертов):"
+  read -r -p "   > " tg_admin_id < /dev/tty
+  echo ""
+  echo "🌐 Адрес панели Remnawave (например: https://panel.example.com):"
+  read -r -p "   > " remnawave_api_url < /dev/tty
+  remnawave_api_url="${remnawave_api_url%/}"
+  echo ""
+  echo "🔑 API токен Remnawave панели:"
+  read -r -p "   > " remnawave_api_token < /dev/tty
+  echo ""
+  echo "📋 Откуда брать Telegram ID пользователя?"
+  echo "   1) Из поля telegramId в API Remnawave"
+  echo "   2) Из username — последнее значение после _"
+  echo "   3) Из username — свой разделитель (или без него)"
+  read -r -p "   Выберите (1, 2 или 3): " tg_id_choice < /dev/tty
+  case "$tg_id_choice" in
+    3)
+      tg_id_source="username_custom"
+      echo "   Символ-разделитель (пусто = весь username целиком):"
+      read -r -p "   > " tg_username_separator < /dev/tty
+      ;;
+    2)
+      tg_id_source="username"
+      tg_username_separator=""
+      ;;
+    *)
+      tg_id_source="telegramId"
+      tg_username_separator=""
+      ;;
+  esac
+  echo ""
+  echo "💬 Сообщение пользователю при блокировке:"
+  echo "   1) Стандартное"
+  echo "   2) Своё кастомное"
+  read -r -p "   Выберите (1 или 2): " tg_msg_choice < /dev/tty
+  if [[ "$tg_msg_choice" == "2" ]]; then
+    echo "   Текст (\\n для переноса строки, {ip} — подстановка IP):"
+    read -r -p "   > " tg_custom_message < /dev/tty
+  else
+    tg_custom_message=""
+  fi
+  echo ""
+  xray_access_log="$(detect_xray_log_cli)"
+  echo "   ✅ Используем: ${xray_access_log:-не указан}"
+
+  set_config_key "ENABLE_TELEGRAM" "true"
+  set_config_key "TG_ENABLED" "true"
+  set_config_key "TG_BOT_TOKEN" "$tg_bot_token"
+  set_config_key "TG_ADMIN_ID" "$tg_admin_id"
+  set_config_key "XRAY_ACCESS_LOG" "$xray_access_log"
+  set_config_key "REMNAWAVE_API_URL" "$remnawave_api_url"
+  set_config_key "REMNAWAVE_API_TOKEN" "$remnawave_api_token"
+  set_config_key "TG_ID_SOURCE" "$tg_id_source"
+  set_config_key "TG_CUSTOM_MESSAGE" "$tg_custom_message"
+  set_config_key "TG_USERNAME_SEPARATOR" "$tg_username_separator"
+
+  echo ""
+  echo -e "${CYAN}⚙️  Разворачиваем Telegram-мониторинг и статистику...${NC}"
+  write_telegram_units_cli
+  systemctl daemon-reload
+  systemctl enable --now mobile443-monitor.service
+  systemctl enable --now mobile443-stats.timer
+
+  echo -e "${CYAN}🔁 Пересобираем правила с учётом новой конфигурации...${NC}"
+  systemctl start mobile443-update.service || systemctl start mobile443-apply.service || true
+
+  echo -e "${GREEN}✅ Telegram/Remnawave интеграция настроена.${NC}"
+  pause
+}
+
+# ---------- 7) Полное удаление ----------
+action_remove() {
+  print_header
+  echo -e "${RED}${BOLD}🗑️  Полное удаление mobile443${NC}"
+  echo ""
+  echo "Будут удалены: правила iptables, ipset, systemd-юниты,"
+  echo "  ${BASE_DIR}, ${STATE_DIR} и сама консоль mobile443."
+  echo ""
+  read -r -p "Введите 'yes' для подтверждения: " confirm < /dev/tty
+  if [[ "$confirm" != "yes" ]]; then
+    echo "Отменено."
+    pause
+    return
+  fi
+
+  local -a remove_ports
+  read -r -a remove_ports <<< "${PORTS:-443}"
+
+  echo "[*] Остановка и отключение сервисов"
+  local unit
+  for unit in mobile443-monitor.service mobile443-stats.timer mobile443-stats.service \
+              mobile443-update.timer mobile443-update.service mobile443-apply.service; do
+    systemctl stop "$unit" 2>/dev/null || true
+    systemctl disable "$unit" 2>/dev/null || true
+  done
+
+  echo "[*] Удаление правил iptables"
+  local chain proto port
+  for chain in INPUT FORWARD DOCKER-USER; do
+    for proto in tcp udp; do
+      for port in "${remove_ports[@]}"; do
+        while iptables -C "$chain" -p "$proto" --dport "$port" -j "$CHAIN_NAME" 2>/dev/null; do
+          iptables -D "$chain" -p "$proto" --dport "$port" -j "$CHAIN_NAME" || true
+        done
+      done
+    done
+  done
+
+  iptables -F "$CHAIN_NAME" 2>/dev/null || true
+  iptables -X "$CHAIN_NAME" 2>/dev/null || true
+  iptables -F "$PRECHECK_CHAIN" 2>/dev/null || true
+  iptables -X "$PRECHECK_CHAIN" 2>/dev/null || true
+
+  echo "[*] Удаление ipset"
+  ipset destroy "${IPSET_ALLOW_NAME}_tmp" 2>/dev/null || true
+  ipset destroy "$IPSET_ALLOW_NAME" 2>/dev/null || true
+  ipset destroy "${IPSET_GOV_NAME}_tmp" 2>/dev/null || true
+  ipset destroy "$IPSET_GOV_NAME" 2>/dev/null || true
+  ipset destroy "${IPSET_ANTISCANNER_NAME}_tmp" 2>/dev/null || true
+  ipset destroy "$IPSET_ANTISCANNER_NAME" 2>/dev/null || true
+  ipset destroy "$IPSET_DEFERRED_BLOCK_NAME" 2>/dev/null || true
+
+  echo "[*] Удаление systemd юнитов"
+  rm -f /etc/systemd/system/mobile443-apply.service
+  rm -f /etc/systemd/system/mobile443-update.service
+  rm -f /etc/systemd/system/mobile443-update.timer
+  rm -f /etc/systemd/system/mobile443-monitor.service
+  rm -f /etc/systemd/system/mobile443-stats.service
+  rm -f /etc/systemd/system/mobile443-stats.timer
+  systemctl daemon-reload
+  systemctl reset-failed 2>/dev/null || true
+
+  echo "[*] Удаление файлов"
+  rm -f /usr/local/sbin/mobile443-common.sh
+  rm -f /usr/local/sbin/mobile443-update.sh
+  rm -f /usr/local/sbin/mobile443-apply-cache.sh
+  rm -f /usr/local/sbin/mobile443-monitor.sh
+  rm -f /usr/local/sbin/mobile443-stats.sh
+  rm -rf "$BASE_DIR"
+  rm -rf "$STATE_DIR"
+
+  echo ""
+  echo -e "${GREEN}[+] mobile443 удалён.${NC}"
+  trap 'rm -f /usr/local/sbin/mobile443' EXIT
+  exit 0
+}
+
+main_menu() {
+  while true; do
+    print_header
+    echo "Порты: ${PORTS:-443} | Traffic Guard: ${ENABLE_TRAF_GUARD:-false} | Mobile allow: ${ENABLE_MOBILE_ALLOW:-false} | Telegram: ${ENABLE_TELEGRAM:-false}"
+    echo ""
+    echo "  1) 🔄 Обновить списки сейчас"
+    echo "  2) ↩️  Вернуть ASN в полный пул"
+    echo "  3) 🚫 Управление исключениями сетей"
+    echo "  4) 🩺 Статус и диагностика"
+    echo "  5) 📊 Статистика (как отправляет бот)"
+    echo "  6) 🤖 Настроить Telegram / Remnawave"
+    echo "  7) 🗑️  Удалить mobile443"
+    echo "  0) Выход"
+    echo ""
+    read -r -p "Выберите пункт меню: " choice < /dev/tty
+    case "$choice" in
+      1) action_update_lists ;;
+      2) action_restore_asn ;;
+      3) action_manage_exclusions ;;
+      4) action_status ;;
+      5) action_show_stats ;;
+      6) action_configure_telegram ;;
+      7) action_remove ;;
+      0) echo "До встречи!"; exit 0 ;;
+      *) ;;
+    esac
+    reload_config
+  done
+}
+
+main_menu
+EOF
+  chmod +x "${BIN_DIR}/mobile443"
+}
+
 write_systemd_units() {
   cat > /etc/systemd/system/mobile443-apply.service <<'EOF'
 [Unit]
@@ -1492,6 +2299,7 @@ remove_all() {
   rm -f "${BIN_DIR}/mobile443-apply-cache.sh"
   rm -f "${BIN_DIR}/mobile443-monitor.sh"
   rm -f "${BIN_DIR}/mobile443-stats.sh"
+  rm -f "${BIN_DIR}/mobile443"
   rm -rf "$BASE_DIR"
   rm -rf "$STATE_DIR"
 
@@ -1503,16 +2311,29 @@ update_all() {
   require_root
 
   local backup_dir backup_config backup_asns target_profile existing_profile requested_profile
+  local backup_asns_excluded backup_static_networks backup_excluded_networks
   requested_profile="$INSTALL_PROFILE"
   backup_dir="$(mktemp -d)"
   backup_config="${backup_dir}/config.conf"
   backup_asns="${backup_dir}/asns.conf"
+  backup_asns_excluded="${backup_dir}/asns_excluded.conf"
+  backup_static_networks="${backup_dir}/static_networks.conf"
+  backup_excluded_networks="${backup_dir}/excluded_networks.conf"
 
   if [[ -f "$CONFIG_FILE" ]]; then
     install -m 0600 "$CONFIG_FILE" "$backup_config"
   fi
   if [[ -f "$ASNS_FILE" ]]; then
     install -m 0644 "$ASNS_FILE" "$backup_asns"
+  fi
+  if [[ -f "$ASNS_EXCLUDED_FILE" ]]; then
+    install -m 0644 "$ASNS_EXCLUDED_FILE" "$backup_asns_excluded"
+  fi
+  if [[ -f "$STATIC_NETWORKS_FILE" ]]; then
+    install -m 0644 "$STATIC_NETWORKS_FILE" "$backup_static_networks"
+  fi
+  if [[ -f "$EXCLUDED_NETWORKS_FILE" ]]; then
+    install -m 0644 "$EXCLUDED_NETWORKS_FILE" "$backup_excluded_networks"
   fi
 
   if [[ ! -f "$backup_config" ]]; then
@@ -1540,7 +2361,8 @@ update_all() {
   echo "    Подход: backup config -> remove -> reinstall"
 
   remove_all
-  normalize_restored_config "$backup_config" "$backup_asns" "$target_profile"
+  normalize_restored_config "$backup_config" "$backup_asns" "$target_profile" \
+    "$backup_asns_excluded" "$backup_static_networks" "$backup_excluded_networks"
   runtime_install_from_config
 
   rm -rf "$backup_dir"
