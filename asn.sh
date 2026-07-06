@@ -1920,11 +1920,10 @@ action_show_stats() {
   echo -e "${CYAN}📊 Статистика mobile443${NC}"
   echo ""
 
-  if [[ "${ENABLE_TELEGRAM:-false}" != "true" ]]; then
-    echo "Telegram/Remnawave интеграция не настроена, поэтому сбор статистики блокировок не ведётся."
-    echo "Настройте интеграцию в пункте меню \"Настроить Telegram/Remnawave\"."
-    pause
-    return
+  if ! systemctl is-active --quiet mobile443-monitor.service 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  mobile443-monitor.service сейчас не запущен — цифры ниже могут быть неактуальны.${NC}"
+    echo "   Проверить: systemctl status mobile443-monitor.service --no-pager"
+    echo ""
   fi
 
   local stats_file="${STATE_DIR}/stats_blocked.txt"
@@ -1957,11 +1956,17 @@ action_show_stats() {
   fi
 
   echo ""
-  echo "Это тот же отчёт, что бот раз в день шлёт админу в Telegram (mobile443-stats.timer, 09:00 UTC)."
-  echo ""
-  read -r -p "Отправить этот отчёт в Telegram прямо сейчас? (y/n): " send_now < /dev/tty
-  if [[ "${send_now,,}" == "y" ]]; then
-    systemctl start mobile443-stats.service && echo -e "${GREEN}✅ Отправлено.${NC}" || echo -e "${RED}✖ Не удалось отправить${NC}"
+  if [[ "${ENABLE_TELEGRAM:-false}" == "true" ]]; then
+    echo "Это тот же отчёт, что бот раз в день шлёт админу в Telegram (mobile443-stats.timer, 09:00 UTC)."
+    echo ""
+    read -r -p "Отправить этот отчёт в Telegram прямо сейчас? (y/n): " send_now < /dev/tty
+    if [[ "${send_now,,}" == "y" ]]; then
+      systemctl start mobile443-stats.service && echo -e "${GREEN}✅ Отправлено.${NC}" || echo -e "${RED}✖ Не удалось отправить${NC}"
+    fi
+  else
+    echo "Telegram/Remnawave не настроены — статистика собирается независимо от этого."
+    echo "Чтобы получать этот же отчёт в Telegram ежедневно, настройте интеграцию:"
+    echo "  sudo mobile443 -> \"Настроить Telegram / Remnawave\""
   fi
   pause
 }
@@ -2306,10 +2311,14 @@ Unit=mobile443-update.service
 WantedBy=timers.target
 EOF
 
-  if [[ "${ENABLE_TELEGRAM:-false}" == "true" ]]; then
-    cat > /etc/systemd/system/mobile443-monitor.service <<'EOF'
+  # Monitor всегда ставится и запускается — он считает заблокированные
+  # соединения и топ IP в stats_blocked.txt (видно в консоли mobile443
+  # -> "Статистика") независимо от того, настроен ли Telegram. Сами
+  # Telegram-уведомления и админский alert внутри monitor.sh включаются
+  # только при ENABLE_TELEGRAM=true.
+  cat > /etc/systemd/system/mobile443-monitor.service <<'EOF'
 [Unit]
-Description=Monitor blocked connections and send Telegram notifications
+Description=Monitor blocked connections, collect stats and send Telegram notifications
 After=network-online.target mobile443-apply.service
 Wants=network-online.target
 
@@ -2325,6 +2334,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
+  if [[ "${ENABLE_TELEGRAM:-false}" == "true" ]]; then
     cat > /etc/systemd/system/mobile443-stats.service <<'EOF'
 [Unit]
 Description=Send daily mobile443 stats to Telegram admin
@@ -2353,16 +2363,12 @@ EOF
   fi
 }
 
-remove_optional_telegram_assets() {
-  systemctl stop mobile443-monitor.service 2>/dev/null || true
+remove_telegram_stats_assets() {
   systemctl stop mobile443-stats.timer 2>/dev/null || true
   systemctl stop mobile443-stats.service 2>/dev/null || true
-  systemctl disable mobile443-monitor.service 2>/dev/null || true
   systemctl disable mobile443-stats.timer 2>/dev/null || true
-  rm -f /etc/systemd/system/mobile443-monitor.service
   rm -f /etc/systemd/system/mobile443-stats.service
   rm -f /etc/systemd/system/mobile443-stats.timer
-  rm -f "${BIN_DIR}/mobile443-monitor.sh"
   rm -f "${BIN_DIR}/mobile443-stats.sh"
 }
 
@@ -2370,12 +2376,12 @@ enable_services() {
   systemctl daemon-reload
   systemctl enable mobile443-apply.service
   systemctl enable --now mobile443-update.timer
+  systemctl enable --now mobile443-monitor.service
 
   if [[ "${ENABLE_TELEGRAM:-false}" == "true" ]]; then
-    systemctl enable --now mobile443-monitor.service
     systemctl enable --now mobile443-stats.timer
   else
-    remove_optional_telegram_assets
+    remove_telegram_stats_assets
     systemctl daemon-reload
   fi
 }
