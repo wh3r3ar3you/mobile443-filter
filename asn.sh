@@ -1539,7 +1539,7 @@ action_update_lists() {
 # ---------- 2) Вернуть ASN в полный пул ----------
 action_restore_asn() {
   print_header
-  echo -e "${CYAN}↩️  Возврат ASN в полный пул${NC}"
+  echo -e "${CYAN}↩️  Вернуть ASN в полный пул${NC}"
   echo ""
 
   local -a entries=()
@@ -1557,25 +1557,39 @@ action_restore_asn() {
     return
   fi
 
-  echo "Исключённые ASN:"
-  local i
-  for i in "${!entries[@]}"; do
-    echo "  $((i+1))) ${entries[$i]}"
-  done
-  echo "  0) Отмена"
-  echo ""
-  read -r -p "Выберите номер ASN для возврата в пул: " choice < /dev/tty
-  [[ -z "$choice" || "$choice" == "0" ]] && return
+  local selected asn_num
 
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#entries[@]} )); then
-    echo -e "${RED}Некорректный выбор${NC}"
-    pause
-    return
+  if (( ${#entries[@]} == 1 )); then
+    # Единственный исключённый ASN — работаем как одна кнопка, без выбора из списка.
+    selected="${entries[0]}"
+    asn_num="$(echo "$selected" | awk '{print $1}')"
+    echo "Найден один исключённый ASN:"
+    echo "  ${selected}"
+    echo ""
+    read -r -p "Вернуть AS${asn_num} целиком в пул и сразу обновить списки? (y/n): " confirm < /dev/tty
+    if [[ "${confirm,,}" != "y" ]]; then
+      return
+    fi
+  else
+    echo "Исключённые ASN:"
+    local i
+    for i in "${!entries[@]}"; do
+      echo "  $((i+1))) ${entries[$i]}"
+    done
+    echo "  0) Отмена"
+    echo ""
+    read -r -p "Выберите номер ASN для возврата в пул: " choice < /dev/tty
+    [[ -z "$choice" || "$choice" == "0" ]] && return
+
+    if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#entries[@]} )); then
+      echo -e "${RED}Некорректный выбор${NC}"
+      pause
+      return
+    fi
+
+    selected="${entries[$((choice-1))]}"
+    asn_num="$(echo "$selected" | awk '{print $1}')"
   fi
-
-  local selected="${entries[$((choice-1))]}"
-  local asn_num
-  asn_num="$(echo "$selected" | awk '{print $1}')"
 
   {
     echo ""
@@ -1591,9 +1605,12 @@ action_restore_asn() {
 
   echo -e "${GREEN}✅ AS${asn_num} возвращён в asns.conf.${NC}"
   echo ""
-  read -r -p "Обновить списки сейчас, чтобы применить изменения? (y/n): " run_now < /dev/tty
-  if [[ "${run_now,,}" == "y" ]]; then
-    systemctl start mobile443-update.service || true
+  echo -e "${CYAN}🔄 Обновляем списки, чтобы получить полный анонс AS${asn_num}...${NC}"
+  if systemctl start mobile443-update.service; then
+    echo -e "${GREEN}✅ Списки обновлены и применены.${NC}"
+  else
+    echo -e "${RED}✖ Обновление завершилось с ошибкой, смотрите журнал:${NC}"
+    echo "   journalctl -u mobile443-update.service -n 30 --no-pager"
   fi
   pause
 }
@@ -2048,7 +2065,7 @@ main_menu() {
     echo "Порты: ${PORTS:-443} | Traffic Guard: ${ENABLE_TRAF_GUARD:-false} | Mobile allow: ${ENABLE_MOBILE_ALLOW:-false} | Telegram: ${ENABLE_TELEGRAM:-false}"
     echo ""
     echo "  1) 🔄 Обновить списки сейчас"
-    echo "  2) ↩️  Вернуть ASN в полный пул"
+    echo "  2) ↩️  Вернуть ASN в полный пул и обновить списки"
     echo "  3) 🚫 Управление исключениями сетей"
     echo "  4) 🩺 Статус и диагностика"
     echo "  5) 📊 Статистика (как отправляет бот)"
