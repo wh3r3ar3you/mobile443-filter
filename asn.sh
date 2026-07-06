@@ -12,6 +12,7 @@ ASNS_FILE="${BASE_DIR}/asns.conf"
 ASNS_EXCLUDED_FILE="${BASE_DIR}/asns_excluded.conf"
 STATIC_NETWORKS_FILE="${BASE_DIR}/static_networks.conf"
 EXCLUDED_NETWORKS_FILE="${BASE_DIR}/excluded_networks.conf"
+MANUAL_ALLOW_FILE="${BASE_DIR}/manual_allow.conf"
 REPO_RAW_DEFAULT="https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main"
 
 DEFAULT_PORTS="443"
@@ -498,6 +499,24 @@ EOF
   chmod 644 "$EXCLUDED_NETWORKS_FILE"
 }
 
+ensure_manual_allow_file() {
+  if [[ -f "$MANUAL_ALLOW_FILE" ]]; then
+    return
+  fi
+
+  cat > "$MANUAL_ALLOW_FILE" <<'EOF'
+# === Ручной allow-лист ===
+# Сети из этого файла ВСЕГДА получают ACCEPT на защищённых портах —
+# раньше traf_guard-блоклистов и раньше проверки мобильного ASN.
+# Используйте для доверенных адресов (например, свой домашний/офисный IP),
+# которым нужен доступ не через мобильный интернет.
+# Формат: один CIDR на строку (для одного IP используйте /32),
+# комментарии через #.
+# Управляется через консоль: sudo mobile443 -> "Ручной allow-лист"
+EOF
+  chmod 644 "$MANUAL_ALLOW_FILE"
+}
+
 install_packages() {
   local -a packages=(curl ipset iptables util-linux ca-certificates)
 
@@ -536,6 +555,7 @@ runtime_install_from_config() {
     write_default_static_networks
   fi
   ensure_excluded_networks_file
+  ensure_manual_allow_file
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -561,6 +581,7 @@ normalize_restored_config() {
   local restored_asns_excluded="$4"
   local restored_static_networks="$5"
   local restored_excluded_networks="$6"
+  local restored_manual_allow="$7"
   local ports enable_traf_guard enable_gov enable_antiscanner enable_mobile_allow
   local enable_telegram tg_bot_token tg_admin_id xray_access_log remnawave_api_url
   local remnawave_api_token tg_id_source tg_custom_message tg_username_separator
@@ -638,6 +659,12 @@ normalize_restored_config() {
   else
     ensure_excluded_networks_file
   fi
+
+  if [[ -f "$restored_manual_allow" ]]; then
+    install -m 0644 "$restored_manual_allow" "$MANUAL_ALLOW_FILE"
+  else
+    ensure_manual_allow_file
+  fi
 }
 
 write_runtime_scripts() {
@@ -658,6 +685,7 @@ ASNS_FILE="${BASE_DIR}/asns.conf"
 ASNS_EXCLUDED_FILE="${BASE_DIR}/asns_excluded.conf"
 STATIC_NETWORKS_FILE="${BASE_DIR}/static_networks.conf"
 EXCLUDED_NETWORKS_FILE="${BASE_DIR}/excluded_networks.conf"
+MANUAL_ALLOW_FILE="${BASE_DIR}/manual_allow.conf"
 ALLOW_CACHE_FILE="${STATE_DIR}/prefixes.txt"
 LOCK_FILE="${STATE_DIR}/lock"
 
@@ -668,6 +696,8 @@ IPSET_GOV_TMP_NAME="${IPSET_GOV_NAME}_tmp"
 IPSET_ANTISCANNER_NAME="traf_guard_antiscanner"
 IPSET_ANTISCANNER_TMP_NAME="${IPSET_ANTISCANNER_NAME}_tmp"
 IPSET_DEFERRED_BLOCK_NAME="mobile443_deferred_block"
+IPSET_MANUAL_ALLOW_NAME="manual_allow_443"
+IPSET_MANUAL_ALLOW_TMP_NAME="${IPSET_MANUAL_ALLOW_NAME}_tmp"
 
 PRECHECK_CHAIN="TRAF_GUARD_PRECHECK"
 CHAIN_NAME="FILTER_MOBILE_443"
@@ -727,6 +757,7 @@ ensure_set_pair() {
 }
 
 ensure_ipsets() {
+  ensure_set_pair "$IPSET_MANUAL_ALLOW_NAME" "$IPSET_MANUAL_ALLOW_TMP_NAME"
   if bool_is_true "$ENABLE_TRAF_GUARD"; then
     if bool_is_true "$ENABLE_TRAF_GUARD_GOVERNMENT"; then
       ensure_set_pair "$IPSET_GOV_NAME" "$IPSET_GOV_TMP_NAME"
@@ -841,6 +872,29 @@ filter_excluded_networks() {
   done < "$input"
 }
 
+# Ручной allow-лист — читается напрямую из manual_allow.conf (не кешируется,
+# файл уже локальный) и грузится в отдельный ipset, независимо от того,
+# включён ли mobile allowlist или traffic-guard.
+sync_manual_allow() {
+  local tmp line
+  tmp="$(mktemp)"
+
+  if [[ -f "$MANUAL_ALLOW_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="$(echo "$line" | sed 's/[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [[ -n "$line" ]] || continue
+      validate_ipv4_cidr "$line" || {
+        log "WARN manual_allow: skip invalid entry '${line}'"
+        continue
+      }
+      echo "$line" >> "$tmp"
+    done < "$MANUAL_ALLOW_FILE"
+  fi
+
+  rebuild_ipset_from_file "$IPSET_MANUAL_ALLOW_NAME" "$IPSET_MANUAL_ALLOW_TMP_NAME" "$tmp" "manual allow" || true
+  rm -f "$tmp"
+}
+
 download_and_validate_list() {
   local url="$1"
   local destination="$2"
@@ -940,6 +994,8 @@ prepare_chains() {
 
   iptables -N "$CHAIN_NAME" 2>/dev/null || true
   iptables -F "$CHAIN_NAME"
+  # Ручной allow-лист — ACCEPT раньше traf_guard-блоклистов и мобильного ASN.
+  iptables -A "$CHAIN_NAME" -m set --match-set "$IPSET_MANUAL_ALLOW_NAME" src -j ACCEPT
   iptables -A "$CHAIN_NAME" -j "$PRECHECK_CHAIN"
 
   if bool_is_true "$ENABLE_MOBILE_ALLOW"; then
@@ -1091,6 +1147,7 @@ flock -n 9 || {
 ensure_deps
 ensure_dirs
 ensure_ipsets
+sync_manual_allow
 
 if bool_is_true "$ENABLE_TRAF_GUARD" && bool_is_true "$ENABLE_TRAF_GUARD_GOVERNMENT"; then
   download_and_validate_list "$GOV_LIST_URL" "$GOV_LIST_FILE" "government_networks"
@@ -1126,6 +1183,7 @@ flock -n 9 || {
 ensure_deps
 ensure_dirs
 ensure_ipsets
+sync_manual_allow
 
 if bool_is_true "$ENABLE_TRAF_GUARD" && bool_is_true "$ENABLE_TRAF_GUARD_GOVERNMENT"; then
   rebuild_ipset_from_file "$IPSET_GOV_NAME" "$IPSET_GOV_TMP_NAME" "$GOV_LIST_FILE" "government_networks" || true
@@ -1642,14 +1700,15 @@ action_manage_exclusions() {
     fi
 
     echo ""
-    echo "  a) Добавить сеть в исключение"
-    (( ${#entries[@]} > 0 )) && echo "  r) Удалить сеть из исключений"
+    echo "Действия:"
+    echo "  1) Добавить сеть в исключение"
+    (( ${#entries[@]} > 0 )) && echo "  2) Удалить сеть из исключений"
     echo "  0) Назад"
     echo ""
     read -r -p "Выберите действие: " action < /dev/tty
 
     case "$action" in
-      a|A)
+      1)
         echo ""
         read -r -p "Введите CIDR сети для исключения (например 10.0.0.0/24): " new_cidr < /dev/tty
         new_cidr="$(strip_comment "$new_cidr")"
@@ -1670,7 +1729,7 @@ action_manage_exclusions() {
         [[ "${run_now,,}" == "y" ]] && { systemctl start mobile443-update.service || true; }
         pause
         ;;
-      r|R)
+      2)
         (( ${#entries[@]} == 0 )) && continue
         echo ""
         read -r -p "Номер исключения для удаления: " del_choice < /dev/tty
@@ -1697,7 +1756,93 @@ action_manage_exclusions() {
   done
 }
 
-# ---------- 4) Статус и диагностика ----------
+# ---------- 4) Ручной allow-лист (всегда ACCEPT) ----------
+action_manage_manual_allow() {
+  while true; do
+    print_header
+    echo -e "${CYAN}✅ Ручной allow-лист (manual_allow.conf)${NC}"
+    echo ""
+    echo "Сети отсюда ВСЕГДА получают ACCEPT — раньше traf_guard-блоклистов"
+    echo "и раньше проверки мобильного ASN. Для одного IP используйте /32."
+    echo ""
+
+    [[ -f "$MANUAL_ALLOW_FILE" ]] || touch "$MANUAL_ALLOW_FILE"
+
+    local -a entries=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      [[ -n "$(strip_comment "$line")" ]] || continue
+      entries+=("$line")
+    done < "$MANUAL_ALLOW_FILE"
+
+    if (( ${#entries[@]} > 0 )); then
+      echo "Текущий allow-лист:"
+      local i
+      for i in "${!entries[@]}"; do
+        echo "  $((i+1))) ${entries[$i]}"
+      done
+    else
+      echo "Ручной allow-лист пуст."
+    fi
+
+    echo ""
+    echo "Действия:"
+    echo "  1) Добавить сеть/IP в allow-лист"
+    (( ${#entries[@]} > 0 )) && echo "  2) Удалить сеть из allow-листа"
+    echo "  0) Назад"
+    echo ""
+    read -r -p "Выберите действие: " action < /dev/tty
+
+    case "$action" in
+      1)
+        echo ""
+        read -r -p "Введите CIDR (например 203.0.113.5/32 для одного IP): " new_cidr < /dev/tty
+        new_cidr="$(strip_comment "$new_cidr")"
+        if ! validate_ipv4_cidr "$new_cidr"; then
+          echo -e "${RED}✖ Некорректный CIDR${NC}"
+          pause
+          continue
+        fi
+        read -r -p "Комментарий (необязательно): " comment < /dev/tty
+        if [[ -n "$comment" ]]; then
+          echo "${new_cidr} # ${comment}" >> "$MANUAL_ALLOW_FILE"
+        else
+          echo "${new_cidr}" >> "$MANUAL_ALLOW_FILE"
+        fi
+        echo -e "${GREEN}✅ Сеть ${new_cidr} добавлена в allow-лист.${NC}"
+        echo ""
+        echo -e "${CYAN}🔄 Применяем изменения...${NC}"
+        systemctl start mobile443-apply.service || systemctl start mobile443-update.service || true
+        pause
+        ;;
+      2)
+        (( ${#entries[@]} == 0 )) && continue
+        echo ""
+        read -r -p "Номер записи для удаления: " del_choice < /dev/tty
+        if ! [[ "$del_choice" =~ ^[0-9]+$ ]] || (( del_choice < 1 || del_choice > ${#entries[@]} )); then
+          echo -e "${RED}Некорректный выбор${NC}"
+          pause
+          continue
+        fi
+        local target="${entries[$((del_choice-1))]}"
+        local tmp
+        tmp="$(mktemp)"
+        grep -vF "$target" "$MANUAL_ALLOW_FILE" > "$tmp" 2>/dev/null || true
+        install -m 0644 "$tmp" "$MANUAL_ALLOW_FILE"
+        rm -f "$tmp"
+        echo -e "${GREEN}✅ Запись удалена.${NC}"
+        echo ""
+        echo -e "${CYAN}🔄 Применяем изменения...${NC}"
+        systemctl start mobile443-apply.service || systemctl start mobile443-update.service || true
+        pause
+        ;;
+      0|"") return ;;
+      *) ;;
+    esac
+  done
+}
+
+# ---------- 5) Статус и диагностика ----------
 action_status() {
   print_header
   echo -e "${CYAN}🩺 Статус и диагностика${NC}"
@@ -1715,11 +1860,12 @@ action_status() {
   echo "  Исключённые ASN (asns_excluded.conf): $(grep -cE '^[0-9]+' "$ASNS_EXCLUDED_FILE" 2>/dev/null || echo 0)"
   echo "  Точечные сети (static_networks.conf): $(grep -cE '^[0-9]+\.' "$STATIC_NETWORKS_FILE" 2>/dev/null || echo 0)"
   echo "  Ручные исключения (excluded_networks.conf): $(grep -cE '^[0-9]+\.' "$EXCLUDED_NETWORKS_FILE" 2>/dev/null || echo 0)"
+  echo "  Ручной allow-лист (manual_allow.conf): $(grep -cE '^[0-9]+\.' "$MANUAL_ALLOW_FILE" 2>/dev/null || echo 0)"
   echo ""
 
   echo -e "${BOLD}Ipset:${NC}"
   local set_name cnt
-  for set_name in "$IPSET_ALLOW_NAME" "$IPSET_GOV_NAME" "$IPSET_ANTISCANNER_NAME" "$IPSET_DEFERRED_BLOCK_NAME"; do
+  for set_name in "$IPSET_MANUAL_ALLOW_NAME" "$IPSET_ALLOW_NAME" "$IPSET_GOV_NAME" "$IPSET_ANTISCANNER_NAME" "$IPSET_DEFERRED_BLOCK_NAME"; do
     if cnt=$(ipset list "$set_name" 2>/dev/null | awk '/Number of entries/ {print $4}') && [[ -n "$cnt" ]]; then
       echo "  $set_name: ${cnt} записей"
     else
@@ -1749,7 +1895,7 @@ action_status() {
   pause
 }
 
-# ---------- 5) Статистика (как отправляет бот) ----------
+# ---------- 6) Статистика (как отправляет бот) ----------
 action_show_stats() {
   print_header
   echo -e "${CYAN}📊 Статистика mobile443${NC}"
@@ -1884,7 +2030,7 @@ WantedBy=timers.target
 UNIT
 }
 
-# ---------- 6) Настроить Telegram / Remnawave ----------
+# ---------- 7) Настроить Telegram / Remnawave ----------
 action_configure_telegram() {
   print_header
   echo -e "${CYAN}🤖 Настройка Telegram / Remnawave${NC}"
@@ -1982,7 +2128,7 @@ action_configure_telegram() {
   pause
 }
 
-# ---------- 7) Полное удаление ----------
+# ---------- 8) Полное удаление ----------
 action_remove() {
   print_header
   echo -e "${RED}${BOLD}🗑️  Полное удаление mobile443${NC}"
@@ -2033,6 +2179,8 @@ action_remove() {
   ipset destroy "${IPSET_ANTISCANNER_NAME}_tmp" 2>/dev/null || true
   ipset destroy "$IPSET_ANTISCANNER_NAME" 2>/dev/null || true
   ipset destroy "$IPSET_DEFERRED_BLOCK_NAME" 2>/dev/null || true
+  ipset destroy "${IPSET_MANUAL_ALLOW_NAME}_tmp" 2>/dev/null || true
+  ipset destroy "$IPSET_MANUAL_ALLOW_NAME" 2>/dev/null || true
 
   echo "[*] Удаление systemd юнитов"
   rm -f /etc/systemd/system/mobile443-apply.service
@@ -2067,10 +2215,11 @@ main_menu() {
     echo "  1) 🔄 Обновить списки сейчас"
     echo "  2) ↩️  Вернуть ASN в полный пул и обновить списки"
     echo "  3) 🚫 Управление исключениями сетей"
-    echo "  4) 🩺 Статус и диагностика"
-    echo "  5) 📊 Статистика (как отправляет бот)"
-    echo "  6) 🤖 Настроить Telegram / Remnawave"
-    echo "  7) 🗑️  Удалить mobile443"
+    echo "  4) ✅ Ручной allow-лист (мой IP всегда проходит)"
+    echo "  5) 🩺 Статус и диагностика"
+    echo "  6) 📊 Статистика (как отправляет бот)"
+    echo "  7) 🤖 Настроить Telegram / Remnawave"
+    echo "  8) 🗑️  Удалить mobile443"
     echo "  0) Выход"
     echo ""
     read -r -p "Выберите пункт меню: " choice < /dev/tty
@@ -2078,10 +2227,11 @@ main_menu() {
       1) action_update_lists ;;
       2) action_restore_asn ;;
       3) action_manage_exclusions ;;
-      4) action_status ;;
-      5) action_show_stats ;;
-      6) action_configure_telegram ;;
-      7) action_remove ;;
+      4) action_manage_manual_allow ;;
+      5) action_status ;;
+      6) action_show_stats ;;
+      7) action_configure_telegram ;;
+      8) action_remove ;;
       0) echo "До встречи!"; exit 0 ;;
       *) ;;
     esac
@@ -2299,6 +2449,8 @@ remove_all() {
   ipset destroy traf_guard_antiscanner_tmp 2>/dev/null || true
   ipset destroy traf_guard_antiscanner 2>/dev/null || true
   ipset destroy mobile443_deferred_block 2>/dev/null || true
+  ipset destroy manual_allow_443_tmp 2>/dev/null || true
+  ipset destroy manual_allow_443 2>/dev/null || true
 
   echo "[*] Удаление systemd юнитов"
   rm -f /etc/systemd/system/mobile443-apply.service
@@ -2328,7 +2480,7 @@ update_all() {
   require_root
 
   local backup_dir backup_config backup_asns target_profile existing_profile requested_profile
-  local backup_asns_excluded backup_static_networks backup_excluded_networks
+  local backup_asns_excluded backup_static_networks backup_excluded_networks backup_manual_allow
   requested_profile="$INSTALL_PROFILE"
   backup_dir="$(mktemp -d)"
   backup_config="${backup_dir}/config.conf"
@@ -2336,6 +2488,7 @@ update_all() {
   backup_asns_excluded="${backup_dir}/asns_excluded.conf"
   backup_static_networks="${backup_dir}/static_networks.conf"
   backup_excluded_networks="${backup_dir}/excluded_networks.conf"
+  backup_manual_allow="${backup_dir}/manual_allow.conf"
 
   if [[ -f "$CONFIG_FILE" ]]; then
     install -m 0600 "$CONFIG_FILE" "$backup_config"
@@ -2351,6 +2504,9 @@ update_all() {
   fi
   if [[ -f "$EXCLUDED_NETWORKS_FILE" ]]; then
     install -m 0644 "$EXCLUDED_NETWORKS_FILE" "$backup_excluded_networks"
+  fi
+  if [[ -f "$MANUAL_ALLOW_FILE" ]]; then
+    install -m 0644 "$MANUAL_ALLOW_FILE" "$backup_manual_allow"
   fi
 
   if [[ ! -f "$backup_config" ]]; then
@@ -2379,7 +2535,8 @@ update_all() {
 
   remove_all
   normalize_restored_config "$backup_config" "$backup_asns" "$target_profile" \
-    "$backup_asns_excluded" "$backup_static_networks" "$backup_excluded_networks"
+    "$backup_asns_excluded" "$backup_static_networks" "$backup_excluded_networks" \
+    "$backup_manual_allow"
   runtime_install_from_config
 
   rm -rf "$backup_dir"
