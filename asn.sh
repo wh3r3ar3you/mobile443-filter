@@ -522,8 +522,8 @@ strip_legacy_rostelecom_from_asns() {
   # normalize_restored_config сохраняет старый asns.conf как есть, поэтому
   # ASN нужно вычистить отдельно — asns_excluded.conf/static_networks.conf
   # к этому моменту уже создаются с нуля корректно.
-  [[ -s "$ASNS_FILE" ]] || return
-  grep -qE '^12389[[:space:]]*$' "$ASNS_FILE" || return
+  [[ -s "$ASNS_FILE" ]] || return 0
+  grep -qE '^12389[[:space:]]*$' "$ASNS_FILE" || return 0
 
   echo "[*] Обнаружен активный AS12389 в существующем asns.conf — исключаем"
   echo "    (заменяется static_networks.conf, ASN сохранён в asns_excluded.conf)"
@@ -533,6 +533,13 @@ strip_legacy_rostelecom_from_asns() {
   grep -vE '^12389[[:space:]]*$' "$ASNS_FILE" > "$tmp"
   install -m 0644 "$tmp" "$ASNS_FILE"
   rm -f "$tmp"
+
+  if [[ -f "${STATE_DIR}/prefixes.txt" ]]; then
+    echo "[*] Сбрасываем кеш mobile allowlist (${STATE_DIR}/prefixes.txt) —"
+    echo "    без AS12389 размер пула меньше, safe-check не должен сравнивать"
+    echo "    новый результат со старым большим числом"
+    rm -f "${STATE_DIR}/prefixes.txt"
+  fi
 }
 
 install_packages() {
@@ -1370,7 +1377,7 @@ process_blocked() {
   now_ts=$(date '+%F %T')
   echo "${now_ts} ${src_ip} ${dst_port}" >> "$STATS_BLOCKED_FILE"
 
-  [[ "${ENABLE_TELEGRAM:-false}" == "true" ]] || return
+  [[ "${ENABLE_TELEGRAM:-false}" == "true" ]] || return 0
 
   # Wait for the IP to appear in xray access.log (connection is allowed through first)
   email=$(find_user_by_ip_with_retry "$src_ip")
@@ -1431,8 +1438,8 @@ process_traf_guard_alert() {
 
   echo "$(date '+%F %T') ${src_ip} ${dst_port} ${reason}" >> "$STATS_BLOCKED_FILE"
 
-  [[ "${ENABLE_TELEGRAM:-false}" == "true" ]] || return
-  [[ -n "${TG_ADMIN_ID:-}" ]] || return
+  [[ "${ENABLE_TELEGRAM:-false}" == "true" ]] || return 0
+  [[ -n "${TG_ADMIN_ID:-}" ]] || return 0
 
   key="${reason}_${src_ip}_${dst_port}"
   if ! should_notify_admin_alert "$key"; then
