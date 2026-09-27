@@ -6,13 +6,21 @@
 #    PORTS="443 8443" bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh)
 #    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) update
 #    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) remove
+#    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) install --lists both --ports "443 8443" --backend nftables -y
+#    bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) --help
 # ═══════════════════════════════════════════════════════════
 set -Eeuo pipefail
 
 REPO_RAW="https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main"
 SCRIPT_NAME="asn.sh"
 INSTALL_DIR="/tmp/mobile443-installer"
-ACTION="${1:-install}"
+# Первый аргумент — действие (install|update|remove), всё остальное —
+# параметры установки, которые передаются в asn.sh как есть (см. --help).
+ACTION="install"
+if [[ $# -gt 0 && "$1" != -* ]]; then
+  ACTION="$1"
+  shift
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -66,6 +74,6 @@ echo -e "${CYAN}ℹ️  Порты по умолчанию: ${PORTS:-443}${NC}"
 echo ""
 
 cd "$INSTALL_DIR"
-bash "${INSTALL_DIR}/${SCRIPT_NAME}" "$ACTION" block-only
+bash "${INSTALL_DIR}/${SCRIPT_NAME}" "$ACTION" block-only "$@"
 
 rm -rf "$INSTALL_DIR"

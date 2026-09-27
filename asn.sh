@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ACTION="${1:-install}"
-INSTALL_PROFILE="${2:-full}"
+ACTION="install"
+INSTALL_PROFILE="full"
 
 BASE_DIR="/opt/mobile443"
 STATE_DIR="/var/lib/mobile443"
@@ -26,6 +26,269 @@ ANTISCANNER_LIST_URL_DEFAULT="${TRAF_GUARD_BASE_URL_DEFAULT}/antiscanner.list"
 TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT="https://cdn.jsdelivr.net/gh/shadow-netlab/traffic-guard-lists@main/public"
 GOV_LIST_URL_FALLBACK_DEFAULT="${TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT}/government_networks.list"
 ANTISCANNER_LIST_URL_FALLBACK_DEFAULT="${TRAF_GUARD_BASE_URL_FALLBACK_DEFAULT}/antiscanner.list"
+
+# ---------------------------------------------------------------------------
+# Параметры установки (флаги командной строки / переменные окружения M443_*).
+# Каждый заданный параметр отвечает на соответствующий вопрос установщика;
+# незаданные спрашиваются интерактивно, а в неинтерактивном режиме
+# (-y / --yes или нет /dev/tty) берутся значения по умолчанию.
+# ---------------------------------------------------------------------------
+NONINTERACTIVE="${M443_YES:-0}"
+
+usage() {
+  cat <<'USAGE'
+Использование:
+  asn.sh [install|update|remove] [full|block-only] [параметры]
+
+Параметры установки (любой можно пропустить — тогда будет задан вопрос):
+  --ports "443 8443"          порты фильтрации (через пробел или запятую)
+  --backend nftables|iptables движок файрвола
+  --lists both|government|antiscanner
+                              traffic-guard листы (только block-only)
+  --telegram | --no-telegram  включить / выключить Telegram-уведомления
+  --tg-token TOKEN            токен Telegram-бота (включает Telegram)
+  --tg-admin ID               Telegram ID администратора
+  --panel-url URL             адрес панели Remnawave
+  --panel-token TOKEN         API-токен панели Remnawave
+  --tg-id-source telegramId|username|custom
+                              откуда брать Telegram ID пользователя
+  --tg-separator SEP          разделитель в username (для custom, можно "")
+  --tg-message TEXT           своё сообщение пользователю (HTML, {ip})
+  --xray-log auto|none|PATH   access.log xray: найти / отключить / путь
+  --manual-allow "CIDR,..."   добавить адреса в manual_allow.conf
+  -y, --yes                   не задавать вопросов, остальное по умолчанию
+  -h, --help                  эта справка
+
+Те же значения можно передать переменными окружения:
+  M443_PORTS M443_BACKEND M443_LISTS M443_TELEGRAM(y|n) M443_TG_TOKEN
+  M443_TG_ADMIN M443_PANEL_URL M443_PANEL_TOKEN M443_TG_ID_SOURCE
+  M443_TG_SEPARATOR M443_TG_MESSAGE M443_XRAY_LOG M443_MANUAL_ALLOW M443_YES=1
+USAGE
+}
+
+die_usage() {
+  echo "✖ $*" >&2
+  echo "  Справка: asn.sh --help" >&2
+  exit 2
+}
+
+opt_is_set() {
+  [[ -n "${!1+set}" ]]
+}
+
+# Переносит M443_* из окружения в OPT_*; флаги командной строки разбираются
+# позже и перекрывают окружение.
+load_env_options() {
+  local name src
+  for name in PORTS BACKEND LISTS TELEGRAM TG_TOKEN TG_ADMIN PANEL_URL \
+              PANEL_TOKEN TG_ID_SOURCE TG_SEPARATOR TG_MESSAGE XRAY_LOG MANUAL_ALLOW; do
+    if opt_is_set "M443_${name}"; then
+      src="M443_${name}"
+      printf -v "OPT_${name}" '%s' "${!src}"
+    fi
+  done
+}
+
+# OPT_* читаются косвенно через ask_input/opt_is_set.
+# shellcheck disable=SC2034
+parse_args() {
+  local positional=() arg value
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+    value=""
+    case "$arg" in
+      --*=*)
+        value="${arg#*=}"
+        arg="${arg%%=*}"
+        ;;
+    esac
+
+    case "$arg" in
+      --ports|--backend|--lists|--tg-token|--tg-admin|--panel-url|--panel-token|\
+      --tg-id-source|--tg-separator|--tg-message|--xray-log|--manual-allow)
+        if [[ "$1" != *=* ]]; then
+          [[ $# -ge 2 ]] || die_usage "Для ${arg} нужно значение"
+          value="$2"
+          shift
+        fi
+        case "$arg" in
+          --ports)        OPT_PORTS="$value" ;;
+          --backend)      OPT_BACKEND="$value" ;;
+          --lists)        OPT_LISTS="$value" ;;
+          --tg-token)     OPT_TG_TOKEN="$value" ;;
+          --tg-admin)     OPT_TG_ADMIN="$value" ;;
+          --panel-url)    OPT_PANEL_URL="$value" ;;
+          --panel-token)  OPT_PANEL_TOKEN="$value" ;;
+          --tg-id-source) OPT_TG_ID_SOURCE="$value" ;;
+          --tg-separator) OPT_TG_SEPARATOR="$value" ;;
+          --tg-message)   OPT_TG_MESSAGE="$value" ;;
+          --xray-log)     OPT_XRAY_LOG="$value" ;;
+          --manual-allow) OPT_MANUAL_ALLOW="$value" ;;
+        esac
+        ;;
+      --telegram)    OPT_TELEGRAM="y" ;;
+      --no-telegram) OPT_TELEGRAM="n" ;;
+      -y|--yes|--non-interactive) NONINTERACTIVE="1" ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      -*)
+        die_usage "Неизвестный параметр: $arg"
+        ;;
+      *)
+        positional+=("$arg")
+        ;;
+    esac
+    shift
+  done
+
+  if [[ ${#positional[@]} -gt 2 ]]; then
+    die_usage "Лишние аргументы: ${positional[*]:2}"
+  fi
+  ACTION="${positional[0]:-install}"
+  INSTALL_PROFILE="${positional[1]:-full}"
+}
+
+# Проверяет значения и переводит их в ответы на вопросы установщика.
+# shellcheck disable=SC2034
+normalize_options() {
+  local p
+  local -a _ports=() _allow=()
+
+  if opt_is_set OPT_PORTS; then
+    OPT_PORTS="${OPT_PORTS//,/ }"
+    read -r -a _ports <<< "$OPT_PORTS"
+    [[ ${#_ports[@]} -gt 0 ]] || die_usage "--ports: пустой список портов"
+    for p in "${_ports[@]}"; do
+      [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 )) || die_usage "--ports: некорректный порт '$p'"
+    done
+    OPT_PORTS="${_ports[*]}"
+  fi
+
+  if opt_is_set OPT_BACKEND; then
+    case "${OPT_BACKEND,,}" in
+      nftables|nft|1) OPT_BACKEND="1" ;;
+      iptables|ipt|ipset|2) OPT_BACKEND="2" ;;
+      *) die_usage "--backend: ожидается nftables или iptables" ;;
+    esac
+  fi
+
+  if opt_is_set OPT_LISTS; then
+    case "${OPT_LISTS,,}" in
+      both|all|1) OPT_LISTS="1" ;;
+      government|gov|2) OPT_LISTS="2" ;;
+      antiscanner|scan|3) OPT_LISTS="3" ;;
+      *) die_usage "--lists: ожидается both, government или antiscanner" ;;
+    esac
+  fi
+
+  if opt_is_set OPT_TELEGRAM; then
+    case "${OPT_TELEGRAM,,}" in
+      y|yes|true|1|on) OPT_TELEGRAM="y" ;;
+      n|no|false|0|off) OPT_TELEGRAM="n" ;;
+      *) die_usage "M443_TELEGRAM: ожидается y или n" ;;
+    esac
+  elif opt_is_set OPT_TG_TOKEN; then
+    OPT_TELEGRAM="y"
+  fi
+
+  if opt_is_set OPT_TG_ID_SOURCE; then
+    case "${OPT_TG_ID_SOURCE,,}" in
+      telegramid|1) OPT_TG_ID_SOURCE="1" ;;
+      username|2) OPT_TG_ID_SOURCE="2" ;;
+      custom|username_custom|3) OPT_TG_ID_SOURCE="3" ;;
+      *) die_usage "--tg-id-source: ожидается telegramId, username или custom" ;;
+    esac
+  elif opt_is_set OPT_TG_SEPARATOR; then
+    OPT_TG_ID_SOURCE="3"
+  fi
+
+  if opt_is_set OPT_TG_MESSAGE; then
+    OPT_TG_MSG_CHOICE="2"
+  fi
+
+  if opt_is_set OPT_XRAY_LOG; then
+    case "$OPT_XRAY_LOG" in
+      none|no|off|"") OPT_XRAY_CHOICE="n" ;;
+      auto) OPT_XRAY_CHOICE="y" ;;
+      /*)
+        OPT_XRAY_CHOICE="y"
+        OPT_XRAY_PATH="$OPT_XRAY_LOG"
+        ;;
+      *) die_usage "--xray-log: ожидается auto, none или абсолютный путь" ;;
+    esac
+  fi
+
+  if opt_is_set OPT_MANUAL_ALLOW; then
+    OPT_MANUAL_ALLOW="${OPT_MANUAL_ALLOW//,/ }"
+    read -r -a _allow <<< "$OPT_MANUAL_ALLOW"
+    for p in "${_allow[@]}"; do
+      [[ "$p" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/([0-9]|[12][0-9]|3[0-2]))?$ ]] \
+        || die_usage "--manual-allow: некорректный IPv4/CIDR '$p'"
+    done
+    OPT_MANUAL_ALLOW="${_allow[*]}"
+  fi
+
+  # Без терминала вопросы задать нельзя (запуск через ssh без -t,
+  # ansible, cloud-init) — работаем неинтерактивно.
+  if [[ "$NONINTERACTIVE" != "1" ]] && ! { : < /dev/tty; } 2>/dev/null; then
+    NONINTERACTIVE="1"
+  fi
+
+  if [[ "$NONINTERACTIVE" == "1" && "$ACTION" == "install" && "$INSTALL_PROFILE" == "full" \
+        && "${OPT_TELEGRAM:-n}" == "y" ]]; then
+    for p in OPT_TG_TOKEN OPT_TG_ADMIN OPT_PANEL_URL OPT_PANEL_TOKEN; do
+      opt_is_set "$p" && [[ -n "${!p}" ]] \
+        || die_usage "Для Telegram без вопросов нужны --tg-token, --tg-admin, --panel-url и --panel-token"
+    done
+  fi
+}
+
+# ask_input VAR OPT_NAME PROMPT [secret]
+# Значение берётся из параметра OPT_NAME, иначе спрашивается с /dev/tty.
+# В неинтерактивном режиме незаданный параметр = пустой ответ = значение
+# по умолчанию для этого вопроса.
+ask_input() {
+  local __target="$1" __opt="$2" __prompt="$3" __secret="${4:-}"
+
+  if opt_is_set "$__opt"; then
+    printf -v "$__target" '%s' "${!__opt}"
+    if [[ -n "$__secret" ]]; then
+      echo "${__prompt}******  (из параметров)"
+    else
+      echo "${__prompt}${!__opt}  (из параметров)"
+    fi
+    return 0
+  fi
+
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    printf -v "$__target" '%s' ""
+    echo "${__prompt}(по умолчанию)"
+    return 0
+  fi
+
+  # shellcheck disable=SC2229
+  read -r -p "$__prompt" "$__target" < /dev/tty
+}
+
+# Добавляет адреса из --manual-allow в manual_allow.conf без дублей.
+apply_opt_manual_allow() {
+  local entry
+  opt_is_set OPT_MANUAL_ALLOW || return 0
+  [[ -n "$OPT_MANUAL_ALLOW" ]] || return 0
+
+  for entry in $OPT_MANUAL_ALLOW; do
+    [[ "$entry" == */* ]] || entry="${entry}/32"
+    if grep -Eq "^[[:space:]]*${entry//./\\.}([[:space:]]|#|$)" "$MANUAL_ALLOW_FILE"; then
+      echo "   = manual allow: $entry уже есть"
+      continue
+    fi
+    printf '%s  # добавлено параметром --manual-allow\n' "$entry" >> "$MANUAL_ALLOW_FILE"
+    echo "   + manual allow: $entry"
+  done
+}
 
 require_root() {
   if [[ "$(id -u)" -ne 0 ]]; then
@@ -68,6 +331,10 @@ confirm_xray_log_path() {
   echo "   ✖ Файл не найден: $path"
   echo "     Пока файла нет, идентификация не работает и немобильные IP"
   echo "     блокируются без Telegram-уведомлений."
+  if [[ "$NONINTERACTIVE" == "1" ]]; then
+    echo "   Используем этот путь (неинтерактивный режим)."
+    return 0
+  fi
   read -r -p "   Использовать этот путь всё равно? (y/n): " use_anyway < /dev/tty
   [[ "${use_anyway,,}" == "y" ]]
 }
@@ -76,6 +343,13 @@ detect_xray_log() {
   echo "🔍 Поиск access.log от xray/remnanode..."
 
   XRAY_ACCESS_LOG=""
+  if opt_is_set OPT_XRAY_PATH; then
+    XRAY_ACCESS_LOG="$OPT_XRAY_PATH"
+    echo "   Путь из параметров: $XRAY_ACCESS_LOG"
+    confirm_xray_log_path "$XRAY_ACCESS_LOG" || XRAY_ACCESS_LOG=""
+    echo "   ✅ Используем: ${XRAY_ACCESS_LOG:-не задан}"
+    return
+  fi
   local -a candidates=(
     "/var/log/remnanode/access.log"
     "/var/log/remnanode/xray/access.log"
@@ -106,7 +380,7 @@ detect_xray_log() {
     echo ""
     echo "   Введите путь или Enter для первого найденного:"
     while true; do
-      read -r -p "   > " user_path < /dev/tty
+      ask_input user_path OPT_NONE "   > "
       XRAY_ACCESS_LOG="${user_path:-$(echo "$found" | head -1)}"
       confirm_xray_log_path "$XRAY_ACCESS_LOG" && break
     done
@@ -117,7 +391,7 @@ detect_xray_log() {
   echo "   ⚠️  Автоматически не найден."
   echo "   Введите полный путь к access.log xray (Enter — пропустить):"
   while true; do
-    read -r -p "   > " XRAY_ACCESS_LOG < /dev/tty
+    ask_input XRAY_ACCESS_LOG OPT_NONE "   > "
     confirm_xray_log_path "$XRAY_ACCESS_LOG" && break
   done
 }
@@ -173,7 +447,7 @@ ask_firewall_backend() {
   echo "   1) nftables (рекомендуется)"
   echo "   2) iptables + ipset"
   local fw_choice
-  read -r -p "   Выберите (1 или 2): " fw_choice < /dev/tty
+  ask_input fw_choice OPT_BACKEND "   Выберите (1 или 2): "
   if [[ "$fw_choice" == "2" ]]; then
     FIREWALL_BACKEND="iptables"
   else
@@ -186,7 +460,7 @@ ask_firewall_backend() {
 interactive_setup_full() {
   local ports tg_choice enable_telegram tg_bot_token tg_admin_id
   local remnawave_api_url remnawave_api_token tg_id_source tg_username_separator
-  local xray_access_log xray_logs_choice
+  local xray_access_log xray_logs_choice tg_id_source_choice tg_msg_choice tg_custom_message
 
   echo ""
   echo "╔═══════════════════════════════════════════════╗"
@@ -197,7 +471,7 @@ interactive_setup_full() {
   echo "📡 На каких портах должен работать фильтр?"
   echo "   Введите порты через пробел"
   echo "   Пример: 443 8443 9443 10443 11443 12443 13443"
-  read -r -p "   > " ports < /dev/tty
+  ask_input ports OPT_PORTS "   > "
   ports="${ports:-$DEFAULT_PORTS}"
   echo "   ✅ Порты: $ports"
   echo ""
@@ -207,40 +481,40 @@ interactive_setup_full() {
   echo "📱 Включить уведомления в Telegram? (y/n)"
   echo "   • Пользователям — уведомление при блокировке подключения"
   echo "   • Админу — ежедневная статистика блокировок"
-  read -r -p "   > " tg_choice < /dev/tty
+  ask_input tg_choice OPT_TELEGRAM "   > "
 
   if [[ "${tg_choice,,}" == "y" ]]; then
     enable_telegram="true"
 
     echo ""
     echo "🤖 Введите токен Telegram бота:"
-    read -r -p "   > " tg_bot_token < /dev/tty
+    ask_input tg_bot_token OPT_TG_TOKEN "   > " secret
     echo ""
     echo "👤 Введите Telegram ID администратора (для статистики):"
-    read -r -p "   > " tg_admin_id < /dev/tty
+    ask_input tg_admin_id OPT_TG_ADMIN "   > "
     echo ""
 
     echo "🌐 Введите адрес панели Remnawave (например: https://panel.example.com):"
-    read -r -p "   > " remnawave_api_url < /dev/tty
+    ask_input remnawave_api_url OPT_PANEL_URL "   > "
     remnawave_api_url="${remnawave_api_url%/}"
     echo "   ✅ Панель: $remnawave_api_url"
     echo ""
 
     echo "🔑 Введите API токен Remnawave панели:"
-    read -r -p "   > " remnawave_api_token < /dev/tty
+    ask_input remnawave_api_token OPT_PANEL_TOKEN "   > " secret
     echo ""
 
     echo "📋 Откуда брать Telegram ID пользователя?"
     echo "   1) Из поля telegramId пользователя в API Remnawave"
     echo "   2) Из поля username — последнее значение после _"
     echo "   3) Из поля username — указать свой разделитель (или без него)"
-    read -r -p "   Выберите (1, 2 или 3): " tg_id_source_choice < /dev/tty
+    ask_input tg_id_source_choice OPT_TG_ID_SOURCE "   Выберите (1, 2 или 3): "
 
     if [[ "$tg_id_source_choice" == "3" ]]; then
       tg_id_source="username_custom"
       echo "   Введите символ-разделитель, после которого идет telegramID (например : или _ или -)."
       echo "   Оставьте пустым, если username и есть telegramID целиком:"
-      read -r -p "   > " tg_username_separator < /dev/tty
+      ask_input tg_username_separator OPT_TG_SEPARATOR "   > "
       if [[ -z "$tg_username_separator" ]]; then
         echo "   ✅ Telegram ID будет браться целиком из username"
       else
@@ -260,13 +534,13 @@ interactive_setup_full() {
     echo "💬 Какое сообщение отправлять пользователям при блокировке?"
     echo "   1) Стандартное (рекомендуется)"
     echo "   2) Свое кастомное сообщение"
-    read -r -p "   Выберите (1 или 2): " tg_msg_choice < /dev/tty
+    ask_input tg_msg_choice OPT_TG_MSG_CHOICE "   Выберите (1 или 2): "
 
     if [[ "$tg_msg_choice" == "2" ]]; then
       echo "   Напишите текст кастомного сообщения (в одну строку, для переноса строки пишите \n)."
       echo "   • Поддерживается HTML-разметка (например, <b>жирный текст</b>)."
       echo "   • Доступна переменная: {ip} - IP-адрес пользователя, с которого была попытка подключения"
-      read -r -p "   > " tg_custom_message < /dev/tty
+      ask_input tg_custom_message OPT_TG_MESSAGE "   > "
       echo "   ✅ Кастомное сообщение сохранено."
     else
       tg_custom_message=""
@@ -282,7 +556,7 @@ interactive_setup_full() {
     echo "   Админ-алерты Traffic Guard и статистика работают в любом случае."
     echo ""
     echo "   Включено ли у вас логирование xray (access.log)? (y/n)"
-    read -r -p "   > " xray_logs_choice < /dev/tty
+    ask_input xray_logs_choice OPT_XRAY_CHOICE "   > "
     if [[ "${xray_logs_choice,,}" == "y" ]]; then
       detect_xray_log
       xray_access_log="${XRAY_ACCESS_LOG:-}"
@@ -336,7 +610,7 @@ setup_block_only() {
   echo "   1) Оба: government + antiscanner"
   echo "   2) Только government"
   echo "   3) Только antiscanner"
-  read -r -p "   > " list_choice < /dev/tty
+  ask_input list_choice OPT_LISTS "   > "
 
   case "$list_choice" in
     2)
@@ -357,7 +631,7 @@ setup_block_only() {
   echo "📡 На каких портах должен работать block-only фильтр?"
   echo "   Введите порты через пробел"
   echo "   Пример: 443 8443 9443"
-  read -r -p "   > " ports < /dev/tty
+  ask_input ports OPT_PORTS "   > "
   ports="${ports:-${PORTS:-$(default_ports_from_existing)}}"
 
   ask_firewall_backend
@@ -650,6 +924,7 @@ runtime_install_from_config() {
   fi
   ensure_excluded_networks_file
   ensure_manual_allow_file
+  apply_opt_manual_allow
 
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
@@ -3222,6 +3497,10 @@ update_all() {
   rm -rf "$backup_dir"
 }
 
+load_env_options
+parse_args "$@"
+normalize_options
+
 case "$ACTION" in
   install)
     install_all
@@ -3233,7 +3512,7 @@ case "$ACTION" in
     remove_all
     ;;
   *)
-    echo "Использование: $0 [install|update|remove] [full|block-only]" >&2
+    usage >&2
     exit 1
     ;;
 esac

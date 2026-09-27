@@ -1,4 +1,4 @@
-# 🛡️ mobile443 v0.8
+# 🛡️ mobile443 v0.9
 
 > ⚠️ **Список сетей Ростелекома (замена `AS12389`) пока в режиме
 > тестирования.** 31 сеть в `static_networks.conf` — это стартовый
@@ -27,6 +27,30 @@
 управление фильтром без переустановки: обновление списков, точечные исключения,
 диагностика, статистика и настройка Telegram/Remnawave. См. раздел «🎛 Консоль
 управления mobile443» ниже.
+
+## ✨ Что изменилось в v0.9
+
+### 🚀 Параметры установки
+
+Все ответы установщика теперь можно передать флагами — удобно раскатывать
+фильтр на пачку серверов одной командой, без ответов на вопросы:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) install \
+  --ports "443 8443" --backend nftables --no-telegram -y
+```
+
+- 🏷 каждый флаг отвечает на свой вопрос; всё, что не передано, спрашивается
+  как раньше
+- 🤐 `-y` / `--yes` — не задавать вопросов вообще, незаданное берётся по
+  умолчанию
+- 🖥 без терминала (`ssh host 'bash -s'`, ansible, cloud-init) установщик сам
+  переходит в неинтерактивный режим — pty-обёртки больше не нужны
+- 🌱 те же значения можно передать переменными окружения `M443_*`
+- ➕ `--manual-allow` сразу кладёт доверенные адреса в `manual_allow.conf`
+- 🛑 некорректное значение останавливает установку до каких-либо изменений
+
+Полный список — в разделе «🚀 Установка с параметрами» ниже.
 
 ## ✨ Что изменилось в v0.8
 
@@ -379,7 +403,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
 
 - включает `traf_guard`
 - включает mobile ASN allowlist
-- спрашивает порты
+- спрашивает порты (или берёт из `--ports`, см. «🚀 Установка с параметрами»)
 - по желанию включает Telegram уведомления
 - при включённом Telegram спрашивает:
   - токен бота
@@ -445,6 +469,86 @@ bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/r
 ```
 
 Здесь тоже используется безопасный путь: `backup -> remove -> reinstall`.
+
+### 🚀 Установка с параметрами (раскатка на серверы)
+
+Любой вопрос установщика можно закрыть флагом. Флаги пишутся после действия
+(`install` / `update`) и работают с обоими установщиками — `install.sh` и
+`install_block_only.sh`:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) install [флаги]
+```
+
+| Флаг | Переменная | Вопрос | Значения |
+|---|---|---|---|
+| `--ports "443 8443"` | `M443_PORTS` | порты фильтрации | через пробел или запятую |
+| `--backend nftables` | `M443_BACKEND` | движок файрвола | `nftables` / `iptables` |
+| `--lists both` | `M443_LISTS` | traffic-guard листы (block-only) | `both` / `government` / `antiscanner` |
+| `--telegram` / `--no-telegram` | `M443_TELEGRAM` | Telegram-уведомления | `y` / `n` |
+| `--tg-token TOKEN` | `M443_TG_TOKEN` | токен бота (сам включает Telegram) | |
+| `--tg-admin ID` | `M443_TG_ADMIN` | Telegram ID админа | |
+| `--panel-url URL` | `M443_PANEL_URL` | адрес панели Remnawave | `https://panel.example.com` |
+| `--panel-token TOKEN` | `M443_PANEL_TOKEN` | API-токен панели | |
+| `--tg-id-source telegramId` | `M443_TG_ID_SOURCE` | откуда брать Telegram ID | `telegramId` / `username` / `custom` |
+| `--tg-separator SEP` | `M443_TG_SEPARATOR` | разделитель в username (`custom`) | можно `""` — username целиком |
+| `--tg-message TEXT` | `M443_TG_MESSAGE` | своё сообщение пользователю | HTML, переменная `{ip}` |
+| `--xray-log auto` | `M443_XRAY_LOG` | логи xray | `auto` — найти, `none` — выключены, `/путь/access.log` |
+| `--manual-allow "IP,CIDR"` | `M443_MANUAL_ALLOW` | — | адреса в `manual_allow.conf` (IP без маски = `/32`) |
+| `-y` / `--yes` | `M443_YES=1` | — | не задавать вопросов |
+| `-h` / `--help` | — | — | справка |
+
+Правила:
+
+- флаг важнее переменной окружения
+- незаданный флаг = обычный вопрос; с `-y` или без терминала — ответ по
+  умолчанию (порт `443`, `nftables`, оба листа, Telegram выключен, логи
+  xray выключены, стандартное сообщение, Telegram ID из `telegramId`)
+- токены в выводе установщика маскируются (`******`)
+- для Telegram без вопросов обязательны `--tg-token`, `--tg-admin`,
+  `--panel-url` и `--panel-token` — иначе установка сразу остановится
+- `--xray-log` с путём к ещё не существующему файлу принимается с
+  предупреждением (нода может появиться позже)
+- при `update` конфигурация берётся из текущей установки; из флагов
+  применяется только `--manual-allow`
+
+Примеры:
+
+```bash
+# Эталон флита: порты 443 и 8443, nftables, без Telegram
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) install \
+  --ports "443 8443" --backend nftables --no-telegram -y
+
+# С Telegram и персональными уведомлениями
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) install \
+  --ports "443 8443" --backend nftables \
+  --tg-token "123456:ABC..." --tg-admin 111111111 \
+  --panel-url https://panel.example.com --panel-token "eyJ..." \
+  --tg-id-source telegramId --xray-log /var/log/remnanode/access.log -y
+
+# Block-only: только government-лист
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install_block_only.sh) install \
+  --lists government --ports 443 -y
+
+# Добавить доверенный адрес при обновлении
+bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) update --manual-allow 203.0.113.5
+```
+
+Раскатка на несколько серверов:
+
+```bash
+for host in 203.0.113.10 203.0.113.11 203.0.113.12; do
+  ssh -p 54777 root@"$host" \
+    "bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh) install --ports '443 8443' --backend nftables --no-telegram -y"
+done
+```
+
+Или через переменные окружения — удобно для ansible / cloud-init:
+
+```bash
+M443_PORTS="443 8443" M443_BACKEND=nftables M443_TELEGRAM=n M443_YES=1 \
+  bash <(curl -Ls https://raw.githubusercontent.com/wh3r3ar3you/mobile443-filter/refs/heads/main/install.sh)
+```
 
 ### 📝 3. Включение логов на ноде (только для персональных уведомлений)
 
