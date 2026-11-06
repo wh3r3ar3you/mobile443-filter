@@ -2251,20 +2251,53 @@ if [[ "$irq_core" =~ ^[0-9]+$ ]] && (( irq_core >= 0 )); then
 fi
 printf -v rps_hex '%x' "$rps_mask"
 
-# count rx queues; only steer with RPS when the NIC has fewer queues than cores
+# count rx queues: RPS/RFS is a software substitute for multi-queue RSS and is
+# only useful when the NIC has a single rx queue
 rxq=0
 for q in /sys/class/net/"$IFACE"/queues/rx-*; do [[ -d "$q" ]] && rxq=$((rxq+1)); done
 (( rxq > 0 )) || { log "iface=$IFACE has no rx queues in sysfs"; exit 0; }
 
-# global RFS flow table (per-queue tables must sum to <= this value)
 sock_entries=32768
+per_queue_flows=$sock_entries
+
+if (( rxq > 1 )); then
+  # Multi-queue NIC: hardware RSS already spreads RX across cores. RPS would
+  # add an extra IPI hop per packet, and rps_flow_cnt on a NIC with ntuple
+  # filters also turns on aRFS (constant filter reprogramming). Leave the
+  # kernel defaults alone — and undo the values older mobile443 versions
+  # wrote here, without touching anything an admin set by hand.
+  reverted=0
+  for q in /sys/class/net/"$IFACE"/queues/rx-*; do
+    if [[ -w "$q/rps_flow_cnt" ]]; then
+      cur="$(cat "$q/rps_flow_cnt" 2>/dev/null || echo 0)"
+      if (( cur > 0 )) && (( cur == sock_entries / rxq || cur == 256 )); then
+        echo 0 > "$q/rps_flow_cnt" 2>/dev/null && reverted=$((reverted+1))
+      fi
+    fi
+    if [[ -w "$q/rps_cpus" ]]; then
+      cur="$(tr -d ',' < "$q/rps_cpus" 2>/dev/null)"
+      cur="${cur:-0}"
+      if [[ "$cur" =~ ^[0-9a-fA-F]+$ ]] && (( 16#$cur != 0 )) \
+         && (( 16#$cur == rps_mask || 16#$cur == full_mask )); then
+        echo 0 > "$q/rps_cpus" 2>/dev/null && reverted=$((reverted+1))
+      fi
+    fi
+  done
+  cur_sock="$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || echo 0)"
+  if (( cur_sock == sock_entries )); then
+    echo 0 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null && reverted=$((reverted+1))
+  fi
+  log "iface=$IFACE cpus=$NCPU rx_queues=$rxq — multi-queue NIC, RPS/RFS/aRFS not applied (reverted_knobs=$reverted)"
+  exit 0
+fi
+
+# single rx queue: steer with RPS onto the other cores, RFS keeps each flow
+# on the core running its consumer. Global flow table must be >= per-queue sum.
 echo "$sock_entries" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
-per_queue_flows=$(( sock_entries / rxq ))
-(( per_queue_flows >= 256 )) || per_queue_flows=256
 
 tuned=0
 for q in /sys/class/net/"$IFACE"/queues/rx-*; do
-  if (( rxq < NCPU )) && [[ -w "$q/rps_cpus" ]]; then
+  if [[ -w "$q/rps_cpus" ]]; then
     echo "$rps_hex" > "$q/rps_cpus" 2>/dev/null && tuned=$((tuned+1))
   fi
   [[ -w "$q/rps_flow_cnt" ]] && { echo "$per_queue_flows" > "$q/rps_flow_cnt" 2>/dev/null || true; }
@@ -2277,12 +2310,14 @@ EOF
   # sysctl profile for high packet-rate hosts: bigger backlog and a larger
   # softirq budget so a burst is drained in-line instead of spilling into
   # ksoftirqd, plus basic SYN-flood resilience. Persisted across reboots.
+  # RPS/RFS knobs (net.core.rps_sock_flow_entries etc.) are deliberately NOT
+  # here: they only make sense on single-queue NICs, so mobile443-nettune.sh
+  # sets them at runtime after checking the rx queue count.
   cat > /etc/sysctl.d/99-mobile443-net.conf <<'EOF'
 # mobile443 network tuning — high packet-rate hosts
 net.core.netdev_max_backlog = 16384
 net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
-net.core.rps_sock_flow_entries = 32768
 net.core.somaxconn = 4096
 net.ipv4.tcp_max_syn_backlog = 8192
 net.ipv4.tcp_syncookies = 1
