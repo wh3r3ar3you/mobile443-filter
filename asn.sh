@@ -2213,9 +2213,15 @@ EOF
 # under a high packet rate that core saturates (ksoftirqd at 100%) and adds
 # latency to everything else on the box, SSH included. RPS spreads the RX work
 # across cores, RFS keeps each flow on the core running its consumer.
+# Only physical NICs with a single rx queue are tuned: multi-queue NICs already
+# spread RX in hardware (RSS), and stacked devices (vlan/bond/bridge) are
+# resolved down to the physical NICs underneath them.
 # No errexit: this is best-effort tuning — a single unavailable sysfs knob or
 # an empty grep (via pipefail) must not abort the whole run.
 set -uo pipefail
+
+SYS_NET=/sys/class/net
+SOCK_ENTRIES=32768
 
 log() { echo "[$(date '+%F %T')] nettune: $*"; }
 
@@ -2224,6 +2230,97 @@ primary_iface() {
   dev="$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'dev \K\S+' | head -1)"
   [[ -n "$dev" ]] && { echo "$dev"; return; }
   ip -o link show up 2>/dev/null | awk -F': ' '$2!="lo"{print $2; exit}'
+}
+
+# Walk a (possibly stacked) interface down to the physical NICs under it.
+# vlan/bond/bridge/macvlan link their lower devices as lower_<name>; a device
+# with no lowers that lives outside /sys/devices/virtual is a real NIC (PCI,
+# virtio, ...). tap/veth/wg/dummy have neither and are dropped, so VM and
+# container ports of a bridge are never picked up.
+PHYS=()
+resolve_phys() {
+  local dev="$1" depth="$2" l lower has_lower=0
+  [[ -e "$SYS_NET/$dev" ]] || return 0
+  for l in "$SYS_NET/$dev"/lower_*; do
+    [[ -e "$l" ]] || continue
+    has_lower=1
+    (( depth < 4 )) || continue
+    lower="$(basename "$(readlink -f "$l")")"
+    [[ -n "$lower" ]] && resolve_phys "$lower" $((depth+1))
+  done
+  (( has_lower )) && return 0
+  [[ "$(readlink -f "$SYS_NET/$dev")" == */devices/virtual/* ]] && return 0
+  [[ " ${PHYS[*]} " == *" $dev "* ]] || PHYS+=("$dev")
+}
+
+count_rxq() {
+  local q n=0
+  for q in "$SYS_NET/$1"/queues/rx-*; do [[ -d "$q" ]] && n=$((n+1)); done
+  echo "$n"
+}
+
+# true if a hex rps_cpus mask looks like one older mobile443 versions wrote:
+# all cores, or all cores minus the one taking the NIC hardirq
+is_our_mask() {
+  local cur="${1//,/}" v x
+  [[ "$cur" =~ ^[0-9a-fA-F]+$ ]] || return 1
+  v=$(( 16#$cur ))
+  (( v != 0 && (v & ~full_mask) == 0 )) || return 1
+  x=$(( full_mask ^ v ))
+  (( x == 0 || (x & (x - 1)) == 0 ))
+}
+
+# Undo RPS/RFS values older mobile443 versions wrote on this device
+# (rps_cpus = our mask, rps_flow_cnt = 32768/rxq or 256). Anything an admin
+# set by hand doesn't match and is left alone.
+revert_dev() {
+  local dev="$1" rxq q cur n=0
+  rxq="$(count_rxq "$dev")"
+  (( rxq > 0 )) || { echo 0; return; }
+  for q in "$SYS_NET/$dev"/queues/rx-*; do
+    if [[ -w "$q/rps_flow_cnt" ]]; then
+      cur="$(cat "$q/rps_flow_cnt" 2>/dev/null || echo 0)"
+      if [[ "$cur" =~ ^[0-9]+$ ]] && (( cur > 0 )) \
+         && (( cur == SOCK_ENTRIES / rxq || cur == 256 )); then
+        echo 0 > "$q/rps_flow_cnt" 2>/dev/null && n=$((n+1))
+      fi
+    fi
+    if [[ -w "$q/rps_cpus" ]]; then
+      cur="$(cat "$q/rps_cpus" 2>/dev/null)"
+      if is_our_mask "${cur:-0}"; then
+        echo 0 > "$q/rps_cpus" 2>/dev/null && n=$((n+1))
+      fi
+    fi
+  done
+  echo "$n"
+}
+
+# core currently taking this NIC's hardirq (-1 if unknown). virtio NICs name
+# their irqs after the virtio device (virtio0-input.0), not the interface.
+irq_core_of() {
+  local dev="$1" devid line pat
+  devid="$(basename "$(readlink -f "$SYS_NET/$dev/device" 2>/dev/null)" 2>/dev/null)"
+  pat="\\b${dev}\\b"
+  [[ "$devid" == virtio* ]] && pat="${pat}|\\b${devid}-input"
+  line="$(grep -E "$pat" /proc/interrupts 2>/dev/null | head -1)"
+  [[ -n "$line" ]] || { echo -1; return; }
+  awk -v n="$NCPU" '{m=-1;idx=-1;for(i=2;i<=n+1;i++){v=$i+0;if(v>m){m=v;idx=i-2}}print idx}' <<< "$line"
+}
+
+tune_dev() {
+  local dev="$1" irq_core rps_mask rps_hex q tuned=0
+  irq_core="$(irq_core_of "$dev")"
+  rps_mask=$full_mask
+  if [[ "$irq_core" =~ ^[0-9]+$ ]]; then
+    rps_mask=$(( full_mask & ~(1 << irq_core) ))
+    (( rps_mask != 0 )) || rps_mask=$full_mask
+  fi
+  printf -v rps_hex '%x' "$rps_mask"
+  for q in "$SYS_NET/$dev"/queues/rx-*; do
+    [[ -w "$q/rps_cpus" ]] && { echo "$rps_hex" > "$q/rps_cpus" 2>/dev/null && tuned=$((tuned+1)); }
+    [[ -w "$q/rps_flow_cnt" ]] && { echo "$SOCK_ENTRIES" > "$q/rps_flow_cnt" 2>/dev/null || true; }
+  done
+  log "dev=$dev rx_queues=1 irq_core=$irq_core rps_cpus=0x$rps_hex rfs_flows=$SOCK_ENTRIES queues_steered=$tuned"
 }
 
 IFACE="$(primary_iface)"
@@ -2236,53 +2333,60 @@ NCPU="$(nproc)"
 full_mask=0
 for ((i=0; i<NCPU; i++)); do full_mask=$(( full_mask | (1 << i) )); done
 
-# core currently taking the NIC hardirq — exclude it from RPS so we don't pile
-# softirq back onto the core already busy with napi/hardirq
-irq_core=-1
-irq_line="$(grep -iE "${IFACE}\b|virtio.*input" /proc/interrupts 2>/dev/null | head -1)"
-if [[ -n "$irq_line" ]]; then
-  irq_core="$(awk -v n="$NCPU" '{m=-1;idx=-1;for(i=2;i<=n+1;i++){v=$i+0;if(v>m){m=v;idx=i-2}}print idx}' <<< "$irq_line")"
+resolve_phys "$IFACE" 0
+
+# Older versions tuned the route interface itself even when it was a vlan /
+# bridge / bond on top of the real NIC — undo that.
+if [[ " ${PHYS[*]} " != *" $IFACE "* ]]; then
+  n="$(revert_dev "$IFACE")"
+  (( n > 0 )) && log "iface=$IFACE is not a physical NIC, reverted $n RPS/RFS knob(s) set by an older version"
 fi
 
-rps_mask=$full_mask
-if [[ "$irq_core" =~ ^[0-9]+$ ]] && (( irq_core >= 0 )); then
-  rps_mask=$(( full_mask & ~(1 << irq_core) ))
-  (( rps_mask != 0 )) || rps_mask=$full_mask
+if (( ${#PHYS[@]} == 0 )); then
+  log "iface=$IFACE: no physical NIC found underneath (tunnel/container/virtual-only) — RPS/RFS not applied"
 fi
-printf -v rps_hex '%x' "$rps_mask"
 
-# count rx queues; only steer with RPS when the NIC has fewer queues than cores
-rxq=0
-for q in /sys/class/net/"$IFACE"/queues/rx-*; do [[ -d "$q" ]] && rxq=$((rxq+1)); done
-(( rxq > 0 )) || { log "iface=$IFACE has no rx queues in sysfs"; exit 0; }
-
-# global RFS flow table (per-queue tables must sum to <= this value)
-sock_entries=32768
-echo "$sock_entries" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
-per_queue_flows=$(( sock_entries / rxq ))
-(( per_queue_flows >= 256 )) || per_queue_flows=256
-
-tuned=0
-for q in /sys/class/net/"$IFACE"/queues/rx-*; do
-  if (( rxq < NCPU )) && [[ -w "$q/rps_cpus" ]]; then
-    echo "$rps_hex" > "$q/rps_cpus" 2>/dev/null && tuned=$((tuned+1))
+single=0
+for dev in "${PHYS[@]}"; do
+  rxq="$(count_rxq "$dev")"
+  if (( rxq == 0 )); then
+    log "dev=$dev has no rx queues in sysfs, skipped"
+  elif (( rxq == 1 )); then
+    tune_dev "$dev"
+    single=$((single+1))
+  else
+    # Multi-queue NIC: hardware RSS already spreads RX across cores. RPS would
+    # add an extra IPI hop per packet, and rps_flow_cnt on a NIC with ntuple
+    # filters also turns on aRFS (constant filter reprogramming).
+    n="$(revert_dev "$dev")"
+    log "dev=$dev rx_queues=$rxq — multi-queue NIC, RPS/RFS/aRFS not applied (reverted_knobs=$n)"
   fi
-  [[ -w "$q/rps_flow_cnt" ]] && { echo "$per_queue_flows" > "$q/rps_flow_cnt" 2>/dev/null || true; }
 done
 
-log "iface=$IFACE cpus=$NCPU rx_queues=$rxq irq_core=$irq_core rps_cpus=0x$rps_hex rfs_flows/q=$per_queue_flows queues_steered=$tuned"
+# global RFS flow table: only needed when at least one single-queue NIC uses RFS
+cur_sock="$(cat /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || echo 0)"
+if (( single > 0 )); then
+  echo "$SOCK_ENTRIES" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+elif [[ "$cur_sock" == "$SOCK_ENTRIES" ]]; then
+  echo 0 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null \
+    && log "reverted rps_sock_flow_entries set by an older version"
+fi
+
+log "iface=$IFACE cpus=$NCPU physical=[${PHYS[*]}] single_queue_tuned=$single"
 EOF
   chmod +x "${BIN_DIR}/mobile443-nettune.sh"
 
   # sysctl profile for high packet-rate hosts: bigger backlog and a larger
   # softirq budget so a burst is drained in-line instead of spilling into
   # ksoftirqd, plus basic SYN-flood resilience. Persisted across reboots.
+  # RPS/RFS knobs (net.core.rps_sock_flow_entries etc.) are deliberately NOT
+  # here: they only make sense on single-queue NICs, so mobile443-nettune.sh
+  # sets them at runtime after checking the rx queue count.
   cat > /etc/sysctl.d/99-mobile443-net.conf <<'EOF'
 # mobile443 network tuning — high packet-rate hosts
 net.core.netdev_max_backlog = 16384
 net.core.netdev_budget = 600
 net.core.netdev_budget_usecs = 8000
-net.core.rps_sock_flow_entries = 32768
 net.core.somaxconn = 4096
 net.ipv4.tcp_max_syn_backlog = 8192
 net.ipv4.tcp_syncookies = 1
